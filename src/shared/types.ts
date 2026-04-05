@@ -95,11 +95,6 @@ export interface PageMeta {
   updatedAt: string
 }
 
-export interface Tag {
-  id: string
-  name: string
-}
-
 // ─── IPC channel names (main ↔ renderer) ─────────────────────────────────────
 
 export const IPC = {

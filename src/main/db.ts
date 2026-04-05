@@ -123,17 +123,6 @@ const SCHEMA = `
 
   CREATE INDEX IF NOT EXISTS idx_pages_notebook
     ON pages (notebook_id, page_order);
-
-  CREATE TABLE IF NOT EXISTS tags (
-    id    TEXT PRIMARY KEY,
-    name  TEXT NOT NULL UNIQUE
-  );
-
-  CREATE TABLE IF NOT EXISTS notebook_tags (
-    notebook_id  TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
-    tag_id       TEXT NOT NULL REFERENCES tags(id)      ON DELETE CASCADE,
-    PRIMARY KEY (notebook_id, tag_id)
-  );
 `
 
 // ── Migrations ─────────────────────────────────────────────────────────────────

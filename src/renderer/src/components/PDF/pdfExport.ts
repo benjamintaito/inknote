@@ -18,6 +18,10 @@ export async function exportAnnotatedPDF(
   const savePath = await ipc<string | null>(IPC.PDF_EXPORT_DIALOG, { defaultName: `${notebookName}-anotado.pdf` })
   if (!savePath) return
 
+  if (pages.length === 0) {
+    throw new Error('No se pudo exportar: el cuaderno no tiene páginas.')
+  }
+
   const { PDFDocument } = await import('pdf-lib')
   const isPDFNotebook = pages.length > 0 && pages[0].pdfPath !== null
 
@@ -35,7 +39,10 @@ export async function exportAnnotatedPDF(
 
     let canvasW: number, canvasH: number, outputPage: import('pdf-lib').PDFPage
 
-    if (isPDFNotebook && pdfDocRef.current) {
+    if (isPDFNotebook) {
+      if (!pdfDocRef.current) {
+        throw new Error('No se pudo exportar: el documento PDF no está cargado.')
+      }
       // Use PDF dimensions from pdfjs document
       const pdfPage = await pdfDocRef.current.getPage(i + 1)
       const vp = pdfPage.getViewport({ scale: PDF_RENDER_SCALE })
