@@ -4,9 +4,15 @@ import Toolbar from './components/Layout/Toolbar'
 import Sidebar from './components/Layout/Sidebar'
 import PageNavigator from './components/Layout/PageNavigator'
 import MainArea from './components/MainArea'
+import ErrorBoundary from './components/ErrorBoundary'
 import { useToolStore, resolveInkSettings } from './stores/toolStore'
 import { useAppStore } from './store/appStore'
 import type { InkToolSettings } from './hooks/useInkCanvas'
+import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts'
+
+function inkAction(action: string) {
+  window.dispatchEvent(new CustomEvent('ink:action', { detail: action }))
+}
 
 // ── Splash screen ─────────────────────────────────────────────────────────────
 
@@ -74,15 +80,25 @@ export default function App() {
     return () => clearTimeout(timer)
   }, [])
 
+  // Global keyboard shortcuts — undo/redo delegate to the ink:action event bus
+  useKeyboardShortcuts({
+    undo: () => inkAction('undo'),
+    redo: () => inkAction('redo'),
+  })
+
   return (
     <>
       {showSplash && <SplashScreen />}
       <div className="flex flex-col h-full bg-surface-50 text-ink">
         <Toolbar />
         <div className="flex flex-1 overflow-hidden">
-          <Sidebar />
+          <ErrorBoundary message="Error en la barra lateral">
+            <Sidebar />
+          </ErrorBoundary>
           <div className="flex flex-col flex-1 overflow-hidden">
-            <MainArea toolRef={toolRef} />
+            <ErrorBoundary message="Error en el área principal">
+              <MainArea toolRef={toolRef} />
+            </ErrorBoundary>
             <PageNavigator />
           </div>
         </div>
