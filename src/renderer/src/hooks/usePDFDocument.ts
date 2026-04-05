@@ -1,6 +1,6 @@
-import { useRef, useCallback, useState } from 'react'
+import { useRef, useCallback, useState, useEffect } from 'react'
 import { GlobalWorkerOptions, getDocument } from 'pdfjs-dist'
-import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist'
+import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from 'pdfjs-dist'
 
 // Configure worker — pdfjs-dist v3 uses .js (not .mjs)
 // @ts-ignore
@@ -13,6 +13,7 @@ export const PDF_RENDER_SCALE = 2  // render at 2× for crisp display
 export function usePDFDocument() {
   const docRef = useRef<PDFDocumentProxy | null>(null)
   const cacheRef = useRef<Map<number, PDFPageProxy>>(new Map())
+  const renderTaskRef = useRef<RenderTask | null>(null)
   const [totalPages, setTotalPages] = useState(0)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -69,7 +70,22 @@ export function usePDFDocument() {
     const ctx = canvas.getContext('2d') as CanvasRenderingContext2D
     if (!ctx) { console.error('[PDF-RENDER] No se pudo obtener 2D context'); return null }
     console.log('[PDF-RENDER] Canvas size:', canvas.width, 'x', canvas.height)
-    await page.render({ canvasContext: ctx, viewport }).promise
+    // Cancel any in-progress render before starting a new one
+    if (renderTaskRef.current) {
+      renderTaskRef.current.cancel()
+      renderTaskRef.current = null
+    }
+    const renderTask = page.render({ canvasContext: ctx, viewport })
+    renderTaskRef.current = renderTask
+    try {
+      await renderTask.promise
+    } catch (e: unknown) {
+      // RenderingCancelledException is thrown when cancelled — treat as non-fatal
+      if (e instanceof Error && e.name === 'RenderingCancelledException') return null
+      throw e
+    } finally {
+      renderTaskRef.current = null
+    }
     console.log('[PDF-RENDER] 4. Página renderizada correctamente')
     return { width: viewport.width, height: viewport.height }
   }, [getPage])
@@ -82,10 +98,26 @@ export function usePDFDocument() {
   }, [getPage])
 
   const cleanup = useCallback(async () => {
+    if (renderTaskRef.current) {
+      renderTaskRef.current.cancel()
+      renderTaskRef.current = null
+    }
     cacheRef.current.forEach(p => p.cleanup())
     cacheRef.current.clear()
     if (docRef.current) {
       await docRef.current.destroy()
+      docRef.current = null
+    }
+  }, [])
+
+  // Destroy the PDF document when the hook's owner unmounts
+  useEffect(() => {
+    return () => {
+      if (renderTaskRef.current) {
+        renderTaskRef.current.cancel()
+        renderTaskRef.current = null
+      }
+      void docRef.current?.destroy()
       docRef.current = null
     }
   }, [])
