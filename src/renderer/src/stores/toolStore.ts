@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { persist } from 'zustand/middleware'
 import type { InkToolSettings } from '../hooks/useInkCanvas'
 import { DEFAULT_TOOL_SETTINGS } from '../components/Canvas/toolDefaults'
 
@@ -100,39 +101,44 @@ interface ToolState {
   setZoom:             (z: number) => void
 }
 
-export const useToolStore = create<ToolState>((set) => ({
-  activeTool:       'pen',
-  straightLine:     false,
-  penColor:         '#1a1a2e',
-  penWidth:         3,
-  pencilColor:      '#374151',
-  pencilWidth:      3,
-  fountainColor:    '#1a1a2e',
-  fountainWidth:    4,
-  highlighterColor: '#facc15',
-  highlighterWidth: 14,
-  watercolorColor:  '#1d4ed8',
-  watercolorWidth:  20,
-  eraserWidth:      20,
-  eraserMode:       'stroke',
-  zoom:             100,
+export const useToolStore = create<ToolState>()(
+  persist(
+    (set) => ({
+      activeTool:       'pen',
+      straightLine:     false,
+      penColor:         '#1a1a2e',
+      penWidth:         3,
+      pencilColor:      '#374151',
+      pencilWidth:      3,
+      fountainColor:    '#1a1a2e',
+      fountainWidth:    4,
+      highlighterColor: '#facc15',
+      highlighterWidth: 14,
+      watercolorColor:  '#1d4ed8',
+      watercolorWidth:  20,
+      eraserWidth:      20,
+      eraserMode:       'stroke',
+      zoom:             100,
 
-  setActiveTool:       (tool) => set({ activeTool: tool }),
-  setStraightLine:     (v)    => set({ straightLine: v }),
-  setPenColor:         (c)    => set({ penColor: c }),
-  setPenWidth:         (w)    => set({ penWidth: w }),
-  setPencilColor:      (c)    => set({ pencilColor: c }),
-  setPencilWidth:      (w)    => set({ pencilWidth: w }),
-  setFountainColor:    (c)    => set({ fountainColor: c }),
-  setFountainWidth:    (w)    => set({ fountainWidth: w }),
-  setHighlighterColor: (c)    => set({ highlighterColor: c }),
-  setHighlighterWidth: (w)    => set({ highlighterWidth: w }),
-  setWatercolorColor:  (c)    => set({ watercolorColor: c }),
-  setWatercolorWidth:  (w)    => set({ watercolorWidth: w }),
-  setEraserWidth:      (w)    => set({ eraserWidth: w }),
-  setEraserMode:       (m)    => set({ eraserMode: m }),
-  setZoom:             (z)    => set({ zoom: z }),
-}))
+      setActiveTool:       (tool) => set({ activeTool: tool }),
+      setStraightLine:     (v)    => set({ straightLine: v }),
+      setPenColor:         (c)    => set({ penColor: c }),
+      setPenWidth:         (w)    => set({ penWidth: w }),
+      setPencilColor:      (c)    => set({ pencilColor: c }),
+      setPencilWidth:      (w)    => set({ pencilWidth: w }),
+      setFountainColor:    (c)    => set({ fountainColor: c }),
+      setFountainWidth:    (w)    => set({ fountainWidth: w }),
+      setHighlighterColor: (c)    => set({ highlighterColor: c }),
+      setHighlighterWidth: (w)    => set({ highlighterWidth: w }),
+      setWatercolorColor:  (c)    => set({ watercolorColor: c }),
+      setWatercolorWidth:  (w)    => set({ watercolorWidth: w }),
+      setEraserWidth:      (w)    => set({ eraserWidth: w }),
+      setEraserMode:       (m)    => set({ eraserMode: m }),
+      setZoom:             (z)    => set({ zoom: z }),
+    }),
+    { name: 'inknote-tool-prefs' }
+  )
+)
 
 // ── Derived: toolStore state → InkCanvas tool settings ────────────────────────
 
