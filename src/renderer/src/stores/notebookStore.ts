@@ -82,8 +82,9 @@ interface NotebookState {
   importPDFFull: (sourcePath: string, name: string) => Promise<PDFImportResult>
 
   // ── OCR ───────────────────────────────────────────────────────────────────────
-  runOCR:    () => Promise<void>
-  dismissOCR: () => void
+  runOCR:      () => Promise<void>
+  dismissOCR:  () => void
+  clearOcrText: () => void
 
   // ── Search ────────────────────────────────────────────────────────────────────
   runSearch:   (query: string) => Promise<void>
@@ -374,6 +375,8 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
   },
 
   dismissOCR: () => set({ ocrText: null, ocrProgress: 0, ocrStatus: '' }),
+
+  clearOcrText: () => set({ ocrText: null, ocrStatus: '' }),
 
   // ── Search ─────────────────────────────────────────────────────────────────────
 
