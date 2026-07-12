@@ -110,11 +110,9 @@ export default function NotebookManager({ onClose, onCreate }: Props) {
   const [color, setColor]     = useState(NOTEBOOK_COLORS[5])
   const [template, setTemplate] = useState<PageTemplate>('blank')
 
-  const { folders, categories, fetchCategories } = useNotebookStore((s) => ({
-    folders:         s.folders,
-    categories:      s.categories,
-    fetchCategories: s.fetchCategories,
-  }))
+  const folders         = useNotebookStore((s) => s.folders)
+  const categories      = useNotebookStore((s) => s.categories)
+  const fetchCategories = useNotebookStore((s) => s.fetchCategories)
 
   useEffect(() => {
     void fetchCategories()

@@ -14,36 +14,38 @@ interface KeyboardShortcutsOptions {
 // ── Hook ───────────────────────────────────────────────────────────────────────
 
 /**
- * Attaches global keyboard shortcuts to the window.
+ * Attaches all global keyboard shortcuts to the window. This is the single
+ * place shortcuts are registered — components dispatch/receive `ink:action`
+ * events instead of adding their own key listeners.
  *
- * Undo/redo are owned by the canvas component (via useUndoRedo), so pass
- * those callbacks in via options rather than pulling from a store.
+ * Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y  undo / redo
+ * Ctrl+S                          save current page
+ * Ctrl+E                          export annotated PDF
+ * Ctrl+N                          new notebook dialog
+ * P / E / H / V                   pen / eraser / highlighter / select
+ * L                               toggle straight-line mode
+ * Escape                          back to pen
  */
 export function useKeyboardShortcuts(options: KeyboardShortcutsOptions = {}): void {
   const { undo, redo } = options
 
-  const setActiveTool    = useToolStore((s) => s.setActiveTool)
-  const saveCurrentPage  = useNotebookStore((s) => s.saveCurrentPage)
-  const createPage       = useNotebookStore((s) => s.createPage)
-
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
-      const target  = e.target as HTMLElement
-      const tagName = target.tagName
+      const target = e.target as HTMLElement
+      const isTyping =
+        target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.tagName === 'SELECT' ||
+        target.isContentEditable
 
       // ── Ctrl combos ─────────────────────────────────────────────────────────
       if (e.ctrlKey || e.metaKey) {
         const key = e.key.toLowerCase()
 
-        if (key === 'z' && e.shiftKey) {
-          e.preventDefault()
-          redo?.()
-          return
-        }
-
         if (key === 'z') {
           e.preventDefault()
-          undo?.()
+          if (e.shiftKey) redo?.()
+          else undo?.()
           return
         }
 
@@ -55,45 +57,52 @@ export function useKeyboardShortcuts(options: KeyboardShortcutsOptions = {}): vo
 
         if (key === 's') {
           e.preventDefault()
-          void saveCurrentPage()
+          void useNotebookStore.getState().saveCurrentPage()
+          return
+        }
+
+        if (key === 'e') {
+          e.preventDefault()
+          window.dispatchEvent(new CustomEvent('ink:action', { detail: 'export' }))
           return
         }
 
         if (key === 'n') {
           e.preventDefault()
-          void createPage()
+          window.dispatchEvent(new CustomEvent('inknote:new-notebook'))
           return
         }
 
         return
       }
 
-      // ── Single-key shortcuts (skip when typing in inputs) ────────────────────
-      if (tagName === 'INPUT' || tagName === 'TEXTAREA') return
+      // ── Single-key shortcuts (skip while typing in form fields) ──────────────
+      if (isTyping) return
 
-      switch (e.key) {
+      const { setActiveTool, setStraightLine, straightLine } = useToolStore.getState()
+
+      switch (e.key.toLowerCase()) {
         case 'p':
-        case 'P':
           setActiveTool('pen')
           break
         case 'e':
-        case 'E':
           setActiveTool('eraser')
           break
         case 'h':
-        case 'H':
           setActiveTool('highlighter')
           break
-        case ' ':
-          e.preventDefault()
-          setActiveTool('pan')
+        case 'v':
+          setActiveTool('select')
           break
-        case 'Escape':
+        case 'l':
+          setStraightLine(!straightLine)
+          break
+        case 'escape':
           setActiveTool('pen')
           break
       }
     },
-    [undo, redo, setActiveTool, saveCurrentPage, createPage]
+    [undo, redo]
   )
 
   useEffect(() => {

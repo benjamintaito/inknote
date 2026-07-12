@@ -18,8 +18,8 @@ import {
 } from './db.js'
 import {
   saveStrokeData, loadStrokeData,
-  saveThumbnail, importPDF, importImage, saveImageFromBuffer, deleteNotebookFiles,
-  ensureNotebookDirs,
+  saveThumbnail, importPDF, importImage, saveImageFromBuffer,
+  deleteNotebookFiles, deletePageFiles, ensureNotebookDirs,
 } from './file-manager.js'
 import {
   showOpenPDFDialog, showSavePDFDialog, readFileBytes, writePDFBytes,
@@ -142,17 +142,21 @@ export function registerIpcHandlers(): void {
     }
   )
 
-  handle<{ notebookId: string; pageId: string; base64: string }, void>(
+  handle<{ notebookId: string; pageId: string; base64: string }, { thumbnailPath: string }>(
     IPC.PAGE_SAVE_THUMBNAIL,
     ({ notebookId, pageId, base64 }) => {
       const path = saveThumbnail(notebookId, pageId, base64)
       updatePagePaths(pageId, { thumbnailPath: path })
+      return { thumbnailPath: path }
     }
   )
 
   handle<{ notebookId: string; pageId: string }, void>(
     IPC.PAGE_DELETE,
-    ({ notebookId: _nb, pageId }) => deletePage(pageId)
+    ({ notebookId, pageId }) => {
+      deletePage(pageId)
+      deletePageFiles(notebookId, pageId)
+    }
   )
 
   handle<{ notebookId: string; pageIds: string[] }, void>(
@@ -165,15 +169,12 @@ export function registerIpcHandlers(): void {
   handle<{ notebookId: string }, { filePath: string } | null>(
     IPC.IMAGE_IMPORT,
     async ({ notebookId }) => {
-      console.log('[IMG-MAIN] image:import llamado, notebookId:', notebookId)
       const result = await dialog.showOpenDialog({
         properties: ['openFile'],
         filters: [{ name: 'Imágenes', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'] }],
       })
-      console.log('[IMG-MAIN] Resultado diálogo:', result.canceled ? 'cancelado' : result.filePaths[0])
       if (result.canceled || !result.filePaths[0]) return null
       const filePath = importImage(notebookId, result.filePaths[0])
-      console.log('[IMG-MAIN] Archivo copiado a:', filePath)
       return { filePath }
     }
   )
@@ -188,11 +189,7 @@ export function registerIpcHandlers(): void {
   handle<{ filePath: string }, string | null>(
     IPC.IMAGE_READ,
     ({ filePath }) => {
-      console.log('[IMG-MAIN] image:read solicitado para:', filePath)
-      if (!existsSync(filePath)) {
-        console.error('[IMG-MAIN] image:read: archivo no encontrado:', filePath)
-        return null
-      }
+      if (!existsSync(filePath)) return null
       try {
         const buf = readFileSync(filePath)
         const ext = extname(filePath).slice(1).toLowerCase()
@@ -201,10 +198,9 @@ export function registerIpcHandlers(): void {
                    : ext === 'webp' ? 'image/webp'
                    : ext === 'bmp'  ? 'image/bmp'
                    : 'image/png'
-        console.log('[IMG-MAIN] image:read: retornando dataUrl,', buf.length, 'bytes, mime:', mime)
         return `data:${mime};base64,${buf.toString('base64')}`
       } catch (e) {
-        console.error('[IMG-MAIN] image:read: error leyendo archivo:', e)
+        console.error('[InkNote] image:read failed:', filePath, e)
         return null
       }
     }
@@ -226,7 +222,6 @@ export function registerIpcHandlers(): void {
   handle<{ sourcePath: string; name: string }, PDFImportResult>(
     IPC.PDF_IMPORT_FULL,
     async ({ sourcePath, name }) => {
-      console.log('[PDF-IMPORT] 1. Handler llamado con:', sourcePath)
       const { PDFDocument } = await import('pdf-lib')
 
       // Read source PDF bytes and open with pdf-lib to get page sizes
@@ -245,7 +240,6 @@ export function registerIpcHandlers(): void {
 
       // Copy PDF into notebook assets
       const pdfPath = importPDF(nb.id, sourcePath)
-      console.log('[PDF-IMPORT] 2. Archivo copiado a:', pdfPath)
 
       // Create one page per PDF page
       const pages: PageMeta[] = []
@@ -263,20 +257,13 @@ export function registerIpcHandlers(): void {
         pages.push({ ...page, pdfPath })
       }
 
-      console.log('[PDF-IMPORT] 3. Cuaderno creado:', nb.id)
-      console.log('[PDF-IMPORT] 4. Páginas creadas:', pages.length, '| pdfPath en página[0]:', pages[0]?.pdfPath)
       return { notebook: nb, pages, pdfPath }
     }
   )
 
   handle<{ filePath: string }, Buffer>(
     IPC.PDF_READ_BYTES,
-    ({ filePath }) => {
-      console.log('[PDF-READ-BYTES] Leyendo:', filePath)
-      const buf = readFileBytes(filePath)
-      console.log('[PDF-READ-BYTES] Bytes leídos:', buf.byteLength)
-      return buf
-    }
+    ({ filePath }) => readFileBytes(filePath)
   )
 
   handle<{ defaultName: string }, string | null>(

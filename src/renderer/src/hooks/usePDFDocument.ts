@@ -6,7 +6,6 @@ import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from 'pdfjs-dist'
 // @ts-ignore
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.js?url'
 GlobalWorkerOptions.workerSrc = pdfWorkerUrl as string
-console.log('[PDF-WORKER] workerSrc configurado:', pdfWorkerUrl)
 
 export const PDF_RENDER_SCALE = 2  // render at 2× for crisp display
 
@@ -19,7 +18,6 @@ export function usePDFDocument() {
   const [error, setError] = useState<string | null>(null)
 
   const loadPDF = useCallback(async (bytes: Uint8Array) => {
-    console.log('[PDF-RENDER] 1. Intentando cargar PDF, bytes:', bytes.byteLength)
     setIsLoading(true)
     setError(null)
     try {
@@ -34,9 +32,8 @@ export function usePDFDocument() {
       const doc = await loadingTask.promise
       docRef.current = doc
       setTotalPages(doc.numPages)
-      console.log('[PDF-RENDER] 2. Documento cargado, páginas:', doc.numPages)
     } catch (e) {
-      console.error('[PDF-RENDER] Error cargando PDF:', e)
+      console.error('[InkNote] Failed to load PDF:', e)
       setError(String(e))
     } finally {
       setIsLoading(false)
@@ -61,15 +58,13 @@ export function usePDFDocument() {
     pageNum: number,
     canvas: HTMLCanvasElement | OffscreenCanvas
   ): Promise<{ width: number; height: number } | null> => {
-    console.log('[PDF-RENDER] 3. Obteniendo página', pageNum)
     const page = await getPage(pageNum)
-    if (!page) { console.error('[PDF-RENDER] getPage devolvió null para página', pageNum); return null }
+    if (!page) return null
     const viewport = page.getViewport({ scale: PDF_RENDER_SCALE })
     canvas.width = viewport.width
     canvas.height = viewport.height
     const ctx = canvas.getContext('2d') as CanvasRenderingContext2D
-    if (!ctx) { console.error('[PDF-RENDER] No se pudo obtener 2D context'); return null }
-    console.log('[PDF-RENDER] Canvas size:', canvas.width, 'x', canvas.height)
+    if (!ctx) return null
     // Cancel any in-progress render before starting a new one
     if (renderTaskRef.current) {
       renderTaskRef.current.cancel()
@@ -86,7 +81,6 @@ export function usePDFDocument() {
     } finally {
       renderTaskRef.current = null
     }
-    console.log('[PDF-RENDER] 4. Página renderizada correctamente')
     return { width: viewport.width, height: viewport.height }
   }, [getPage])
 

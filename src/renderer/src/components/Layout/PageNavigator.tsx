@@ -1,14 +1,8 @@
 import { useRef, useEffect } from 'react'
 import { Plus, Trash2 } from 'lucide-react'
 import { useNotebookStore } from '../../stores/notebookStore'
+import { useFileImage } from '../../hooks/useFileImage'
 import type { PageMeta } from '@shared/types'
-
-// ── Helpers ────────────────────────────────────────────────────────────────────
-
-function toFileUrl(path: string | null): string | null {
-  if (!path) return null
-  return 'file:///' + path.replace(/\\/g, '/')
-}
 
 // ── Page card ─────────────────────────────────────────────────────────────────
 
@@ -26,7 +20,7 @@ function PageCard({
   onDelete: () => void
 }) {
   const ref = useRef<HTMLButtonElement>(null)
-  const thumbUrl = toFileUrl(page.thumbnailPath)
+  const thumbUrl = useFileImage(page.thumbnailPath)
 
   // Scroll active page into view when it changes
   useEffect(() => {

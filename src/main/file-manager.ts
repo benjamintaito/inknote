@@ -153,6 +153,20 @@ export function saveImageFromBuffer(notebookId: string, buffer: Buffer, ext: str
   return destPath
 }
 
+// ── Page deletion ──────────────────────────────────────────────────────────────
+
+/** Remove a page's stroke data and thumbnail from disk (assets are shared, kept). */
+export function deletePageFiles(notebookId: string, pageId: string): void {
+  const candidates = [
+    join(pagesDir(notebookId), `page-${pageId}.json.gz`),
+    join(pagesDir(notebookId), `page-${pageId}.json`),
+    join(thumbnailsDir(notebookId), `thumb-${pageId}.jpg`),
+  ]
+  for (const path of candidates) {
+    if (existsSync(path)) rmSync(path, { force: true })
+  }
+}
+
 // ── Notebook deletion ──────────────────────────────────────────────────────────
 
 export function deleteNotebookFiles(notebookId: string): void {

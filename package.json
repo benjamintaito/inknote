@@ -1,13 +1,20 @@
 {
   "name": "inknote",
   "version": "0.1.0",
-  "description": "Digital note-taking app for HP Spectre with touch screen",
+  "description": "Digital ink note-taking app for Windows pen/touch devices — pressure-sensitive drawing, PDF annotation, on-device OCR",
   "main": "out/main/index.js",
   "type": "module",
+  "license": "MIT",
+  "author": "Benjamín Taito",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/benjamintaito/inknote.git"
+  },
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
-    "package": "electron-builder",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "package": "npm run build && electron-builder",
     "preview": "electron-vite preview"
   },
   "dependencies": {

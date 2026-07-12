@@ -108,11 +108,17 @@ export class TouchGestureHandler {
 
   // ── Pointer event handlers (touch only) ────────────────────────────────────
 
+  /** Convert client coords → container-relative coords (the viewport's space). */
+  private toLocal(e: PointerEvent): TInfo {
+    const rect = this.el.getBoundingClientRect()
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top }
+  }
+
   private readonly onPointerDown = (e: PointerEvent): void => {
     if (e.pointerType !== 'touch') return
     if (this.opts.isPenActive?.()) { this.reset(); return }
 
-    this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
+    this.pointers.set(e.pointerId, this.toLocal(e))
 
     if (this.pointers.size >= 2) {
       e.preventDefault()
@@ -132,7 +138,7 @@ export class TouchGestureHandler {
     if (e.pointerType !== 'touch') return
     if (!this.pointers.has(e.pointerId)) return
 
-    this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
+    this.pointers.set(e.pointerId, this.toLocal(e))
 
     if (this.pointers.size < 2 || this.activeMid === null) return
     e.preventDefault()

@@ -3,6 +3,7 @@
  * Notebook and page data lives in notebookStore.ts
  */
 import { create } from 'zustand'
+import { persist } from 'zustand/middleware'
 
 interface AppState {
   isSidebarOpen: boolean
@@ -11,19 +12,20 @@ interface AppState {
   toggleTheme: () => void
 }
 
-export const useAppStore = create<AppState>((set) => ({
-  isSidebarOpen: true,
-  toggleSidebar: () => set((s) => ({ isSidebarOpen: !s.isSidebarOpen })),
+export const useAppStore = create<AppState>()(
+  persist(
+    (set) => ({
+      isSidebarOpen: true,
+      toggleSidebar: () => set((s) => ({ isSidebarOpen: !s.isSidebarOpen })),
 
-  isDark: false,
-  toggleTheme: () =>
-    set((s) => {
-      const next = !s.isDark
-      if (next) {
-        document.documentElement.classList.add('dark')
-      } else {
-        document.documentElement.classList.remove('dark')
-      }
-      return { isDark: next }
+      isDark: false,
+      toggleTheme: () =>
+        set((s) => {
+          const next = !s.isDark
+          document.documentElement.classList.toggle('dark', next)
+          return { isDark: next }
+        }),
     }),
-}))
+    { name: 'inknote-app-prefs' }
+  )
+)

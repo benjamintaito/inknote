@@ -55,19 +55,35 @@ export default function InkCanvas({ toolSettingsRef }: InkCanvasProps) {
     activeToolRef
   )
 
-  const prevPageIdRef  = useRef<string | null>(null)
+  const prevPageRef    = useRef<{ id: string; notebookId: string } | null>(null)
+  const loadedPageIdRef = useRef<string | null>(null)
   const nullDocRef     = useRef(null)
 
   useEffect(() => {
     function handleState(state: ReturnType<typeof useNotebookStore.getState>) {
       const page = state.activePage
-      if (page?.id === prevPageIdRef.current) return
-      if (prevPageIdRef.current && backgroundRef.current) {
-        const thumbnail = generateThumbnail(backgroundRef.current)
-        void useNotebookStore.getState().saveThumbnail(thumbnail)
+
+      // Page switched: snapshot the outgoing page's canvas as its thumbnail
+      if (page?.id !== prevPageRef.current?.id) {
+        const prev = prevPageRef.current
+        if (prev && backgroundRef.current) {
+          const thumbnail = generateThumbnail(backgroundRef.current)
+          void useNotebookStore.getState().saveThumbnail(thumbnail, {
+            notebookId: prev.notebookId,
+            pageId:     prev.id,
+          })
+        }
+        prevPageRef.current = page ? { id: page.id, notebookId: page.notebookId } : null
+        loadedPageIdRef.current = null
+        if (!page) loadPageData([], [], 'blank')
       }
-      prevPageIdRef.current = page?.id ?? null
-      loadPageData(state.strokes, state.images, page?.template ?? 'blank')
+
+      // Load page content once the async stroke fetch has finished.
+      // (selectPage sets activePage first with empty strokes, then fills them in.)
+      if (!page || state.isLoading) return
+      if (loadedPageIdRef.current === page.id) return
+      loadedPageIdRef.current = page.id
+      loadPageData(state.strokes, state.images, page.template ?? 'blank')
     }
     const unsub = useNotebookStore.subscribe(handleState)
     handleState(useNotebookStore.getState())
@@ -159,21 +175,17 @@ export default function InkCanvas({ toolSettingsRef }: InkCanvasProps) {
 
   useEffect(() => {
     const handler = async () => {
-      console.log('[IMG-RENDERER] InkCanvas: ink:import-image recibido')
       const { activeNotebook } = useNotebookStore.getState()
-      if (!activeNotebook) { console.warn('[IMG-RENDERER] InkCanvas: no hay activeNotebook'); return }
+      if (!activeNotebook) return
       const result = await window.electronAPI.invoke<{ filePath: string } | null>(
         IPC.IMAGE_IMPORT, { notebookId: activeNotebook.id }
       )
-      console.log('[IMG-RENDERER] InkCanvas: respuesta IMAGE_IMPORT:', result)
       if (result?.filePath) {
         const container = containerRef.current
         const vp = viewportRef.current
         const cx = container ? (container.clientWidth  / 2 - vp.offsetX) / vp.scale : 1240
         const cy = container ? (container.clientHeight / 2 - vp.offsetY) / vp.scale : 1754
-        console.log('[IMG-RENDERER] InkCanvas: llamando addImageToPage, centro canvas:', cx.toFixed(0), cy.toFixed(0))
         await addImageToPage(result.filePath, cx, cy)
-        console.log('[IMG-RENDERER] InkCanvas: addImageToPage completado')
       }
     }
     window.addEventListener('ink:import-image', handler as EventListener)
@@ -189,7 +201,9 @@ export default function InkCanvas({ toolSettingsRef }: InkCanvasProps) {
       e.preventDefault()
       if (e.ctrlKey) {
         const factor = e.deltaY < 0 ? 1.08 : 0.93
-        zoomAt(e.clientX, e.clientY, factor)
+        // Viewport offsets are container-relative — convert from client coords
+        const rect = container.getBoundingClientRect()
+        zoomAt(e.clientX - rect.left, e.clientY - rect.top, factor)
       } else {
         const vp = viewportRef.current
         viewportRef.current = { ...vp, offsetX: vp.offsetX - e.deltaX, offsetY: vp.offsetY - e.deltaY }
@@ -300,8 +314,13 @@ export default function InkCanvas({ toolSettingsRef }: InkCanvasProps) {
         case 'undo':       undo(); break
         case 'redo':       redo(); break
         case 'clear':      clearCanvas(); break
-        case 'zoom-in':    zoomAt(window.innerWidth / 2, window.innerHeight / 2, 1.2); break
-        case 'zoom-out':   zoomAt(window.innerWidth / 2, window.innerHeight / 2, 1 / 1.2); break
+        case 'zoom-in':
+        case 'zoom-out': {
+          if (!container) break
+          const { width, height } = container.getBoundingClientRect()
+          zoomAt(width / 2, height / 2, action === 'zoom-in' ? 1.2 : 1 / 1.2)
+          break
+        }
         case 'zoom-reset': {
           if (!container) break
           const { width, height } = container.getBoundingClientRect()

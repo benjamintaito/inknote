@@ -6,7 +6,7 @@ import PageNavigator from './components/Layout/PageNavigator'
 import MainArea from './components/MainArea'
 import ErrorBoundary from './components/ErrorBoundary'
 import { useToolStore, resolveInkSettings } from './stores/toolStore'
-import { useAppStore } from './store/appStore'
+import { useAppStore } from './stores/appStore'
 import type { InkToolSettings } from './hooks/useInkCanvas'
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts'
 

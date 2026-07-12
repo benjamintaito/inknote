@@ -76,14 +76,15 @@ interface NotebookState {
   setStrokes:      (strokes: Stroke[]) => void
   setImages:       (images: PageImage[]) => void
   saveCurrentPage: () => Promise<void>
-  saveThumbnail:   (base64: string) => Promise<void>
+  /** Save a page thumbnail. `target` defaults to the active page — pass it
+   *  explicitly when capturing the page being navigated away from. */
+  saveThumbnail:   (base64: string, target?: { notebookId: string; pageId: string }) => Promise<void>
 
   // ── PDF import ────────────────────────────────────────────────────────────────
   importPDFFull: (sourcePath: string, name: string) => Promise<PDFImportResult>
 
   // ── OCR ───────────────────────────────────────────────────────────────────────
-  runOCR:      () => Promise<void>
-  dismissOCR:  () => void
+  runOCR:       () => Promise<void>
   clearOcrText: () => void
 
   // ── Search ────────────────────────────────────────────────────────────────────
@@ -260,16 +261,17 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
     const { activeNotebook, activePage } = get()
     if (!activeNotebook) return
     await ipc(IPC.PAGE_DELETE, { notebookId: activeNotebook.id, pageId })
-    set((s) => {
-      const pages = s.pages.filter((p) => p.id !== pageId)
-      return {
-        pages,
-        activePage: activePage?.id === pageId ? (pages[0] ?? null) : activePage,
-        strokes:    activePage?.id === pageId ? [] : s.strokes,
-        images:     activePage?.id === pageId ? [] : s.images,
-        isDirty:    activePage?.id === pageId ? false : s.isDirty,
-      }
-    })
+
+    const remaining = get().pages.filter((p) => p.id !== pageId)
+    if (activePage?.id === pageId) {
+      // The deleted page must not be re-saved by the pending auto-save
+      clearSaveTimer()
+      set({ pages: remaining, activePage: null, strokes: [], images: [], isDirty: false })
+      // selectPage loads the next page's strokes from disk
+      if (remaining.length > 0) await get().selectPage(remaining[0])
+    } else {
+      set({ pages: remaining })
+    }
   },
 
   reorderPages: async (pageIds) => {
@@ -324,14 +326,18 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
     }
   },
 
-  saveThumbnail: async (base64) => {
+  saveThumbnail: async (base64, target) => {
     const { activeNotebook, activePage } = get()
-    if (!activeNotebook || !activePage) return
-    await ipc(IPC.PAGE_SAVE_THUMBNAIL, {
-      notebookId: activeNotebook.id,
-      pageId:     activePage.id,
-      base64,
-    })
+    const notebookId = target?.notebookId ?? activeNotebook?.id
+    const pageId     = target?.pageId     ?? activePage?.id
+    if (!notebookId || !pageId) return
+    const { thumbnailPath } = await ipc<{ thumbnailPath: string }>(
+      IPC.PAGE_SAVE_THUMBNAIL, { notebookId, pageId, base64 }
+    )
+    // Refresh thumbnailPath locally so sidebar/navigator previews update
+    set((s) => ({
+      pages: s.pages.map((p) => (p.id === pageId ? { ...p, thumbnailPath } : p)),
+    }))
   },
 
   // ── PDF import ─────────────────────────────────────────────────────────────────
@@ -374,9 +380,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
     }
   },
 
-  dismissOCR: () => set({ ocrText: null, ocrProgress: 0, ocrStatus: '' }),
-
-  clearOcrText: () => set({ ocrText: null, ocrStatus: '' }),
+  clearOcrText: () => set({ ocrText: null, ocrProgress: 0, ocrStatus: '' }),
 
   // ── Search ─────────────────────────────────────────────────────────────────────
 

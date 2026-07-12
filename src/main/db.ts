@@ -411,7 +411,7 @@ export function searchPages(query: string): SearchResult[] {
          p.ocr_text
        FROM pages     p
        JOIN notebooks n ON n.id = p.notebook_id
-       WHERE p.ocr_text LIKE ? ESCAPE '\'
+       WHERE p.ocr_text LIKE ? ESCAPE '\\'
        LIMIT 30`,
       [`%${q.replace(/[%_\\]/g, '\\$&')}%`]
     )
@@ -422,7 +422,8 @@ export function searchPages(query: string): SearchResult[] {
       pageOrder:    r['page_order']    as number,
       excerpt:      buildExcerpt(r['ocr_text'] as string ?? '', q),
     }))
-  } catch {
+  } catch (e) {
+    console.error('[InkNote] searchPages failed:', e)
     return []
   }
 }

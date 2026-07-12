@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell } from 'electron'
+import { app, BrowserWindow, dialog, shell } from 'electron'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
 import { initDb, closeDb } from './db.js'
@@ -38,9 +38,15 @@ function createWindow(): void {
   }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   // Init DB and IPC before creating the window so handlers are ready
-  initDb()
+  try {
+    await initDb()
+  } catch (e) {
+    dialog.showErrorBox('InkNote', `No se pudo inicializar la base de datos:\n${String(e)}`)
+    app.quit()
+    return
+  }
   registerIpcHandlers()
   createWindow()
 
@@ -50,6 +56,9 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => {
-  closeDb()
   if (process.platform !== 'darwin') app.quit()
+})
+
+app.on('will-quit', () => {
+  closeDb()
 })

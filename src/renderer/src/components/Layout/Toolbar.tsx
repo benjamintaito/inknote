@@ -14,7 +14,6 @@ import {
   Check,
   X,
   ScanText,
-  Copy,
   Loader2,
   Moon,
   Sun,
@@ -37,7 +36,7 @@ import {
   type EraserMode,
 } from '../../stores/toolStore'
 import { useNotebookStore } from '../../stores/notebookStore'
-import { useAppStore } from '../../store/appStore'
+import { useAppStore } from '../../stores/appStore'
 
 // ── Ink dispatch helper ────────────────────────────────────────────────────────
 
@@ -285,78 +284,44 @@ function ClearButton() {
   )
 }
 
-// ── OCR button + result panel ──────────────────────────────────────────────────
+// ── OCR button (results are shown in <OcrPanel />) ─────────────────────────────
 
 function OCRControl() {
-  const { activePage, strokes, isOCRRunning, ocrProgress, ocrText, runOCR, dismissOCR } =
-    useNotebookStore()
+  const activePage   = useNotebookStore((s) => s.activePage)
+  const strokes      = useNotebookStore((s) => s.strokes)
+  const isOCRRunning = useNotebookStore((s) => s.isOCRRunning)
+  const ocrProgress  = useNotebookStore((s) => s.ocrProgress)
+  const runOCR       = useNotebookStore((s) => s.runOCR)
 
   const hasStrokes = strokes.some((s) => s.tool !== 'eraser')
   const disabled   = !activePage || !hasStrokes || isOCRRunning
 
-  const handleCopy = () => {
-    if (ocrText) void navigator.clipboard.writeText(ocrText)
-  }
-
   return (
-    <div className="relative flex items-center shrink-0">
-      <button
-        onClick={() => { if (!isOCRRunning) void runOCR() }}
-        disabled={disabled}
-        title="Reconocer texto (OCR)"
-        className={[
-          'flex items-center gap-1.5 px-2.5 h-8 rounded-md text-xs font-medium transition-colors shrink-0',
-          isOCRRunning
-            ? 'bg-blue-50 text-blue-600 cursor-wait'
-            : disabled
-              ? 'text-ink-soft opacity-40 cursor-default'
-              : 'text-ink-soft hover:bg-surface-100 hover:text-ink',
-        ].join(' ')}
-      >
-        {isOCRRunning ? (
-          <>
-            <Loader2 size={13} className="animate-spin" />
-            <span className="hidden sm:inline">{Math.round(ocrProgress * 100)}%</span>
-          </>
-        ) : (
-          <>
-            <ScanText size={13} />
-            <span className="hidden sm:inline">OCR</span>
-          </>
-        )}
-      </button>
-
-      {ocrText !== null && !isOCRRunning && (
-        <div className="absolute right-0 top-full mt-1 z-50 bg-white border border-surface-200 rounded-lg shadow-lg p-3 w-72 flex flex-col gap-2">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-semibold text-ink-soft uppercase tracking-wide">Texto reconocido</span>
-            <div className="flex gap-1">
-              <button
-                onClick={handleCopy}
-                title="Copiar"
-                className="p-1 rounded text-ink-soft hover:text-ink hover:bg-surface-100 transition-colors"
-              >
-                <Copy size={12} />
-              </button>
-              <button
-                onClick={dismissOCR}
-                title="Cerrar"
-                className="p-1 rounded text-ink-soft hover:text-ink hover:bg-surface-100 transition-colors"
-              >
-                <X size={12} />
-              </button>
-            </div>
-          </div>
-          {ocrText ? (
-            <p className="text-xs text-ink leading-relaxed whitespace-pre-wrap max-h-48 overflow-y-auto font-mono">
-              {ocrText}
-            </p>
-          ) : (
-            <p className="text-xs text-ink-soft italic">No se detectó texto manuscrito.</p>
-          )}
-        </div>
+    <button
+      onClick={() => { if (!isOCRRunning) void runOCR() }}
+      disabled={disabled}
+      title="Reconocer texto (OCR)"
+      className={[
+        'flex items-center gap-1.5 px-2.5 h-8 rounded-md text-xs font-medium transition-colors shrink-0',
+        isOCRRunning
+          ? 'bg-blue-50 text-blue-600 cursor-wait'
+          : disabled
+            ? 'text-ink-soft opacity-40 cursor-default'
+            : 'text-ink-soft hover:bg-surface-100 hover:text-ink',
+      ].join(' ')}
+    >
+      {isOCRRunning ? (
+        <>
+          <Loader2 size={13} className="animate-spin" />
+          <span className="hidden sm:inline">{Math.round(ocrProgress * 100)}%</span>
+        </>
+      ) : (
+        <>
+          <ScanText size={13} />
+          <span className="hidden sm:inline">OCR</span>
+        </>
       )}
-    </div>
+    </button>
   )
 }
 

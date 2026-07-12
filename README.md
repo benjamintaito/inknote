@@ -1,24 +1,40 @@
-# inknote
+# InkNote
 
-> A digital ink note-taking app built for HP Spectre and other Windows touch/pen devices.
+> A digital ink note-taking app for Windows pen/touch devices, built with Electron.
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.5-3178c6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Electron](https://img.shields.io/badge/Electron-31-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
 [![React](https://img.shields.io/badge/React-18.3-61dafb?logo=react&logoColor=black)](https://react.dev/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-Pressure-sensitive ink rendering, PDF annotation, on-device OCR, and a full notebook/folder system — all local, no cloud required.
+Pressure-sensitive ink rendering, PDF annotation, on-device OCR, and a full notebook/folder system — everything stored locally.
 
 ---
 
 ## Features
 
-- **Ink rendering** — pressure-sensitive pen input with 6 brush types (pen, pencil, fountain, highlighter, watercolor, eraser), Catmull-Rom stroke smoothing, and predictive ink for low latency
+- **Ink rendering** — pressure-sensitive pen input with 5 brush types (pen, pencil, fountain, highlighter, watercolor) plus stroke/area eraser, Catmull-Rom stroke smoothing, and predictive ink for low latency
 - **Palm rejection** — contact-area filters + cooldown window after pen liftoff
-- **PDF workflow** — import any PDF, annotate it with ink, export back to PDF
-- **On-device OCR** — Tesseract.js v7, Spanish + English, indexes text for full-text search
-- **Auto-save** — 3 s debounce after stroke changes; strokes stored as gzip JSON
-- **Notebook system** — folders → notebooks → pages, with color-coding, templates, and thumbnails
-- **Page templates** — blank, lined, dotted, grid, PDF (A4 @ 300 DPI: 2480×3508 px)
+- **PDF workflow** — import any PDF as a notebook, annotate it with ink and images, export back to PDF
+- **Images** — insert from file or paste from clipboard; move, resize, rotate, reorder, lock, and set opacity with the select tool
+- **OCR** — Tesseract.js v7 (Spanish + English) recognizes handwriting on-device and indexes it for full-text search across notebooks
+- **Auto-save** — 3 s debounce after stroke changes; strokes stored as gzipped JSON
+- **Notebook system** — folders → notebooks → pages, with color-coding, categories, templates, and thumbnails
+- **Page templates** — blank, lined, dotted, grid (A4 @ 300 DPI: 2480×3508 px), plus PDF pages
+- **Touch gestures** — two-finger pan and pinch-zoom with inertia; Space+drag pan with the mouse
+- **Dark mode** — persisted across sessions, along with tool preferences
+
+### Keyboard shortcuts
+
+| Shortcut | Action |
+|---|---|
+| `Ctrl+Z` / `Ctrl+Shift+Z` / `Ctrl+Y` | Undo / redo |
+| `Ctrl+S` | Save current page |
+| `Ctrl+E` | Export annotated PDF |
+| `Ctrl+N` | New notebook |
+| `P` / `E` / `H` / `V` | Pen / eraser / highlighter / select |
+| `L` | Toggle straight-line mode (`Shift` snaps to 45°) |
+| `Ctrl+scroll` | Zoom · `Space+drag` pan |
 
 ---
 
@@ -26,16 +42,16 @@ Pressure-sensitive ink rendering, PDF annotation, on-device OCR, and a full note
 
 | Layer | Tech | Notes |
 |---|---|---|
-| Framework | Electron 31 | Main + renderer process isolation |
+| Framework | Electron 31 | Main + renderer process isolation, `contextIsolation` on |
 | UI | React 18.3 + TypeScript 5.5 | Strict mode enabled |
-| Styling | Tailwind CSS 3.4 | |
+| Styling | Tailwind CSS 3.4 | CSS variables for light/dark theming |
 | State | Zustand 4.5 | 3 stores: app, tool, notebook |
-| Database | sql.js 1.14.1 (SQLite/WASM) | Atomically persisted to disk |
+| Database | sql.js 1.14 (SQLite/WASM) | Atomically persisted to disk, no native compilation |
 | PDF render | pdfjs-dist 3.11 | 5-page LRU cache |
-| PDF write | pdf-lib 1.17.1 | Export + annotation |
-| OCR | tesseract.js 7.0 | Singleton worker, on-device |
-| Build | electron-vite 2.3 + Vite 5 | ESM output for main/preload |
-| Packaging | electron-builder 24 | |
+| PDF write | pdf-lib 1.17 | Export + annotation |
+| OCR | tesseract.js 7.0 | Singleton worker, runs on-device |
+| Build | electron-vite 2.3 + Vite 5 | ESM main, CJS preload |
+| Packaging | electron-builder 24 | NSIS installer for Windows |
 
 ---
 
@@ -57,8 +73,8 @@ src/
 │   ├── App.tsx
 │   ├── stores/
 │   │   ├── notebookStore.ts   # Main data store — async IPC actions, auto-save
-│   │   ├── toolStore.ts       # Active tool, color, width, zoom
-│   │   └── appStore.ts        # Sidebar open/close, dark mode
+│   │   ├── toolStore.ts       # Active tool, color, width, zoom (persisted)
+│   │   └── appStore.ts        # Sidebar open/close, dark mode (persisted)
 │   ├── components/
 │   │   ├── Canvas/            # Ink rendering pipeline
 │   │   │   ├── InkCanvas.tsx
@@ -68,14 +84,18 @@ src/
 │   │   │   ├── StrokeSmoothing.ts
 │   │   │   ├── PredictiveInk.ts
 │   │   │   ├── PalmRejection.ts
-│   │   │   └── TouchGestureHandler.ts
+│   │   │   ├── TouchGestureHandler.ts
+│   │   │   └── ImageSelectionOverlay.tsx
 │   │   ├── PDF/               # PDF annotation + export
 │   │   ├── Layout/            # Toolbar, Sidebar, PageNavigator
-│   │   └── Notebook/          # NotebookManager, PageTemplates
+│   │   ├── Notebook/          # NotebookManager, PageTemplates
+│   │   └── OcrPanel.tsx       # OCR progress + results panel
 │   ├── hooks/
 │   │   ├── useInkCanvas.ts    # Canvas state + eraser logic
 │   │   ├── usePDFDocument.ts  # PDF.js loading + page caching
-│   │   └── useUndoRedo.ts     # 50-item history stack
+│   │   ├── useUndoRedo.ts     # 50-item history stack (strokes + images)
+│   │   ├── useKeyboardShortcuts.ts  # All global shortcuts, single source
+│   │   └── useFileImage.ts    # Local image → data URL (CSP-safe)
 │   └── utils/
 │       └── ocr.ts             # Tesseract.js singleton + binarization
 │
@@ -101,7 +121,8 @@ Pointer Event (stylus)
 
 ## Data Storage
 
-Everything is local. No network calls.
+All notes stay on your machine. The only network access is a one-time download
+of the OCR language data (Spanish + English, ~15 MB) the first time you run OCR.
 
 ```
 %APPDATA%/inknote/
@@ -124,8 +145,6 @@ notebooks   (id, name, subject, color, folder_id, created_at, updated_at)
 pages       (id, notebook_id, page_order, width, height, template,
              pdf_path, stroke_data_path, thumbnail_path, ocr_text,
              created_at, updated_at)
-tags        (id, name)
-notebook_tags (notebook_id, tag_id)
 ```
 
 Foreign keys enabled. Atomic writes via temp→rename. `ocr_text` added via migration if missing.
@@ -148,12 +167,12 @@ All renderer↔main communication goes through `contextBridge`. Channels are typ
 
 ---
 
-## Dev Setup
+## Development
 
 **Prerequisites:** Node.js 20+, npm
 
 ```bash
-git clone https://github.com/benjataito/inknote
+git clone https://github.com/benjamintaito/inknote
 cd inknote
 npm install
 
@@ -161,31 +180,32 @@ npm install
 npm run dev
 
 # Type check
-npx tsc --noEmit
+npm run typecheck
 
-# Build
+# Build bundles into out/
 npm run build
 
-# Package (creates distributable in dist/)
+# Build + package the Windows installer into dist/
 npm run package
 ```
 
-The app expects to run on Windows with a pen/touch device. Palm rejection and pressure curves are tuned for the HP Spectre x360 digitizer, but any WinTab-compatible stylus should work.
+The app targets Windows with a pen/touch device. Palm rejection and pressure
+curves are tuned for the HP Spectre x360 digitizer, but any stylus that reports
+through the Pointer Events API should work; a mouse works too.
 
 ---
 
 ## Known Limitations
 
-- **PDF export** embeds strokes as a PNG overlay (rasterized). Vector stroke export via pdf-lib is not yet implemented.
-- **Tool preferences** (color, brush size) reset on app restart — not persisted.
-- **OCR results** are indexed for search but not surfaced in a UI panel.
-- **Keyboard shortcuts** not yet bound.
-- UI text is in Spanish.
+- **PDF export** embeds annotations as a rasterized PNG overlay per page (vector export is not implemented).
+- **OCR language data** (spa/eng) is downloaded from a CDN on first OCR run and cached by the browser layer afterwards.
+- **UI text is in Spanish** — i18n is not wired up yet.
+- No cloud sync — this is by design, but there's also no built-in backup beyond copying `%APPDATA%/inknote`.
+
+Contributions are welcome — feel free to open an issue or PR.
 
 ---
 
-## Project Status
+## License
 
-`v0.1.0` — functional for daily use, actively developed.
-
-Core ink pipeline and notebook management are solid. PDF annotation works. OCR search works. Open items tracked inline via `// TODO` comments throughout the source.
+[MIT](LICENSE) © Benjamín Taito

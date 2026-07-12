@@ -3,18 +3,14 @@ import {
   Plus, ChevronDown, ChevronRight, BookOpen, Trash2, FileUp,
   Search, X, FolderPlus, Folder, MoreHorizontal, FolderOpen,
 } from 'lucide-react'
-import { useAppStore } from '../../store/appStore'
+import { useAppStore } from '../../stores/appStore'
 import { useNotebookStore } from '../../stores/notebookStore'
 import NotebookManager, { type NotebookCreateData } from '../Notebook/NotebookManager'
+import { useFileImage } from '../../hooks/useFileImage'
 import type { FolderMeta, NotebookMeta, PageMeta, PageTemplate, SearchResult } from '@shared/types'
 import { IPC } from '@shared/types'
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
-
-function toFileUrl(path: string | null): string | null {
-  if (!path) return null
-  return 'file:///' + path.replace(/\\/g, '/')
-}
 
 const FOLDER_COLORS = [
   '#6B7280', '#ef4444', '#f97316', '#eab308',
@@ -29,7 +25,7 @@ function PageItem({
   page: PageMeta; index: number; isActive: boolean
   onClick: () => void; onDelete: () => void
 }) {
-  const thumbUrl = toFileUrl(page.thumbnailPath)
+  const thumbUrl = useFileImage(page.thumbnailPath)
   return (
     <li className="group relative">
       <button

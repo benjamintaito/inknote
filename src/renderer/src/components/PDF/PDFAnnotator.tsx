@@ -1,4 +1,4 @@
-import { useRef, useEffect, useCallback, useState, RefObject } from 'react'
+import { useRef, useEffect, useCallback, RefObject } from 'react'
 import { ChevronLeft, ChevronRight, Download, Loader2 } from 'lucide-react'
 import { useNotebookStore } from '../../stores/notebookStore'
 import { useInkCanvas } from '../../hooks/useInkCanvas'
@@ -69,13 +69,14 @@ export default function PDFAnnotator({ toolSettingsRef }: PDFAnnotatorProps) {
     activeToolRef
   )
 
-  const { loadPDF, renderPageToCanvas, totalPages, isLoading, cleanup, docRef } = usePDFDocument()
-
-  const [isPDFLoaded, setIsPDFLoaded] = useState(false)
+  const { loadPDF, renderPageToCanvas, isLoading, cleanup, docRef } = usePDFDocument()
 
   // Track the currently loaded PDF path to avoid reloading the same PDF
   const currentPdfPathRef = useRef<string | null>(null)
-  const prevPageIdRef = useRef<string | null>(null)
+  const prevPageRef       = useRef<{ id: string; notebookId: string } | null>(null)
+  const pdfReadyPageIdRef = useRef<string | null>(null)   // PDF layer rendered for this page
+  const renderingPageIdRef = useRef<string | null>(null)  // PDF render in progress for this page
+  const loadedPageIdRef   = useRef<string | null>(null)   // strokes/images applied for this page
 
   // ── Apply CSS transform ───────────────────────────────────────────────────
 
@@ -124,77 +125,98 @@ export default function PDFAnnotator({ toolSettingsRef }: PDFAnnotatorProps) {
   // ── Page switching ────────────────────────────────────────────────────────
 
   useEffect(() => {
-    async function handleState(state: ReturnType<typeof useNotebookStore.getState>) {
-      const page = state.activePage
-      if (page?.id === prevPageIdRef.current) return
-
-      // Save thumbnail of the page we're leaving
-      if (prevPageIdRef.current && pdfCanvasRef.current && bgCanvasRef.current) {
-        try {
-          const thumbnail = generateCompositeThumbnail(pdfCanvasRef.current, bgCanvasRef.current)
-          await useNotebookStore.getState().saveThumbnail(thumbnail)
-        } catch (_e) {
-          // ignore thumbnail errors
-        }
-      }
-
-      prevPageIdRef.current = page?.id ?? null
-
-      if (!page || page.template !== 'pdf') return
-
-      const pdfPath = page.pdfPath
-      if (!pdfPath) { console.warn('[PDFAnnotator] Página PDF sin pdfPath:', page.id); return }
-
-      console.log('[PDFAnnotator] Cargando página', page.pageOrder + 1, '| pdfPath:', pdfPath)
-
-      // Load PDF bytes only if path changed
-      if (pdfPath !== currentPdfPathRef.current) {
-        currentPdfPathRef.current = pdfPath
-        setIsPDFLoaded(false)
-        try {
-          console.log('[PDFAnnotator] Solicitando bytes al main via IPC...')
-          const raw = await ipc<Uint8Array>(IPC.PDF_READ_BYTES, { filePath: pdfPath })
-          console.log('[PDFAnnotator] Bytes recibidos, tipo:', Object.prototype.toString.call(raw), 'byteLength:', (raw as unknown as ArrayBuffer)?.byteLength ?? Object.keys(raw).length)
-          // Normalise: IPC may deliver Buffer as a plain object on some Electron versions
-          const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(Object.values(raw as unknown as Record<string, number>))
-          await loadPDF(bytes)
-        } catch (e) {
-          console.error('[PDFAnnotator] Error cargando PDF bytes:', e)
-          return
-        }
-      }
-
-      // Render the PDF page (pageOrder is 0-based, pdfjs is 1-based)
-      const pdfCanvas = pdfCanvasRef.current
-      if (!pdfCanvas) { console.error('[PDFAnnotator] pdfCanvasRef.current es null'); return }
-      console.log('[PDFAnnotator] Renderizando página', page.pageOrder + 1)
-      const result = await renderPageToCanvas(page.pageOrder + 1, pdfCanvas)
-      if (!result) { console.error('[PDFAnnotator] renderPageToCanvas devolvió null'); return }
-
-      const { width: canvasW, height: canvasH } = result
-
-      // Sync stroke canvas dimensions to match PDF canvas
-      if (bgCanvasRef.current) {
-        bgCanvasRef.current.width  = canvasW
-        bgCanvasRef.current.height = canvasH
-      }
-      if (overlayCanvasRef.current) {
-        overlayCanvasRef.current.width  = canvasW
-        overlayCanvasRef.current.height = canvasH
-      }
-
-      // Recenter viewport
-      recenterViewport(canvasW, canvasH)
-
-      // Load strokes + images for this page (template='pdf' keeps bgCanvas transparent)
-      console.log('[PDF-BG] ¿Página tiene PDF?', pdfPath)
-      console.log('[PDF-BG] Cargando datos de página PDF, strokes:', state.strokes.length, 'images:', state.images.length)
+    // Apply strokes/images once both the PDF layer and the async stroke fetch
+    // are ready. selectPage sets activePage first with empty strokes and fills
+    // them in later, so this may be reached from several subscribe callbacks.
+    function applyPageData(state: ReturnType<typeof useNotebookStore.getState>, pageId: string) {
+      if (state.activePage?.id !== pageId) return
+      if (state.isLoading) return
+      if (pdfReadyPageIdRef.current !== pageId) return
+      if (loadedPageIdRef.current === pageId) return
+      loadedPageIdRef.current = pageId
       loadPageData(state.strokes, state.images, 'pdf')
-      console.log('[PDF-BG] Re-renderizado completo — bgCanvas transparent sobre pdfCanvas')
-      setIsPDFLoaded(true)
     }
 
-    const unsub = useNotebookStore.subscribe(handleState)
+    async function handleState(state: ReturnType<typeof useNotebookStore.getState>) {
+      const page = state.activePage
+
+      // Page switched: snapshot the outgoing page's canvas as its thumbnail
+      if (page?.id !== prevPageRef.current?.id) {
+        const prev = prevPageRef.current
+        if (prev && pdfCanvasRef.current && bgCanvasRef.current) {
+          try {
+            const thumbnail = generateCompositeThumbnail(pdfCanvasRef.current, bgCanvasRef.current)
+            void useNotebookStore.getState().saveThumbnail(thumbnail, {
+              notebookId: prev.notebookId,
+              pageId:     prev.id,
+            })
+          } catch {
+            // ignore thumbnail errors
+          }
+        }
+        prevPageRef.current = page ? { id: page.id, notebookId: page.notebookId } : null
+        pdfReadyPageIdRef.current = null
+        loadedPageIdRef.current = null
+      }
+
+      if (!page || page.template !== 'pdf' || !page.pdfPath) return
+      const pdfPath = page.pdfPath
+
+      // Render the PDF layer once per page
+      if (pdfReadyPageIdRef.current !== page.id && renderingPageIdRef.current !== page.id) {
+        renderingPageIdRef.current = page.id
+        try {
+          // Load PDF bytes only if the source file changed
+          if (pdfPath !== currentPdfPathRef.current) {
+            currentPdfPathRef.current = pdfPath
+            try {
+              const raw = await ipc<Uint8Array>(IPC.PDF_READ_BYTES, { filePath: pdfPath })
+              // Normalise: IPC may deliver Buffer as a plain object on some Electron versions
+              const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(Object.values(raw as unknown as Record<string, number>))
+              await loadPDF(bytes)
+            } catch (e) {
+              console.error('[InkNote] Failed to load PDF bytes:', e)
+              currentPdfPathRef.current = null
+              return
+            }
+          }
+
+          // Render the PDF page (pageOrder is 0-based, pdfjs is 1-based)
+          const pdfCanvas = pdfCanvasRef.current
+          if (!pdfCanvas) return
+          const result = await renderPageToCanvas(page.pageOrder + 1, pdfCanvas)
+          if (!result) return
+
+          // Abort if the user already navigated elsewhere during the async render
+          if (useNotebookStore.getState().activePage?.id !== page.id) return
+
+          const { width: canvasW, height: canvasH } = result
+
+          // Sync stroke canvas dimensions to match PDF canvas
+          if (bgCanvasRef.current) {
+            bgCanvasRef.current.width  = canvasW
+            bgCanvasRef.current.height = canvasH
+          }
+          if (overlayCanvasRef.current) {
+            overlayCanvasRef.current.width  = canvasW
+            overlayCanvasRef.current.height = canvasH
+          }
+
+          recenterViewport(canvasW, canvasH)
+          pdfReadyPageIdRef.current = page.id
+        } finally {
+          renderingPageIdRef.current = null
+        }
+
+        // The stroke fetch may have finished while the PDF was rendering
+        applyPageData(useNotebookStore.getState(), page.id)
+        return
+      }
+
+      applyPageData(state, page.id)
+    }
+
+    const unsub = useNotebookStore.subscribe((state) => void handleState(state))
     // Process the current state immediately — the component may mount
     // after activePage is already set (subscribe only fires on future changes).
     void handleState(useNotebookStore.getState())
@@ -223,21 +245,17 @@ export default function PDFAnnotator({ toolSettingsRef }: PDFAnnotatorProps) {
 
   useEffect(() => {
     const handler = async () => {
-      console.log('[IMG-IMPORT] 1. Abriendo diálogo desde PDFAnnotator')
       const { activeNotebook } = useNotebookStore.getState()
       if (!activeNotebook) return
       const result = await window.electronAPI.invoke<{ filePath: string } | null>(
         IPC.IMAGE_IMPORT, { notebookId: activeNotebook.id }
       )
-      console.log('[IMG-IMPORT] 2. Respuesta IPC:', result)
       if (result?.filePath) {
         const container = containerRef.current
         const vp = viewportRef.current
         const cx = container ? (container.clientWidth  / 2 - vp.offsetX) / vp.scale : 400
         const cy = container ? (container.clientHeight / 2 - vp.offsetY) / vp.scale : 600
-        console.log('[IMG-IMPORT] 3. Llamando addImageToPage, centro:', cx, cy)
         await addImageToPage(result.filePath, cx, cy)
-        console.log('[IMG-IMPORT] 4. Imagen agregada a la página PDF')
       }
     }
     window.addEventListener('ink:import-image', handler as EventListener)
@@ -258,8 +276,6 @@ export default function PDFAnnotator({ toolSettingsRef }: PDFAnnotatorProps) {
         const { activeNotebook } = useNotebookStore.getState()
         if (!activeNotebook) return
 
-        console.log('[PASTE] Imagen detectada en clipboard, tipo:', item.type)
-
         const ext = item.type === 'image/jpeg' ? 'jpg'
                   : item.type === 'image/gif'  ? 'gif'
                   : item.type === 'image/webp' ? 'webp'
@@ -269,7 +285,6 @@ export default function PDFAnnotator({ toolSettingsRef }: PDFAnnotatorProps) {
         const result = await window.electronAPI.invoke<{ filePath: string }>(
           IPC.IMAGE_PASTE, { notebookId: activeNotebook.id, bytes: buffer, ext }
         )
-        console.log('[PASTE] Imagen guardada:', result)
         if (result?.filePath) {
           const container = containerRef.current
           const vp = viewportRef.current
@@ -294,7 +309,9 @@ export default function PDFAnnotator({ toolSettingsRef }: PDFAnnotatorProps) {
       e.preventDefault()
       if (e.ctrlKey) {
         const factor = e.deltaY < 0 ? 1.08 : 0.93
-        zoomAt(e.clientX, e.clientY, factor)
+        // Viewport offsets are container-relative — convert from client coords
+        const rect = container.getBoundingClientRect()
+        zoomAt(e.clientX - rect.left, e.clientY - rect.top, factor)
       } else {
         const vp = viewportRef.current
         viewportRef.current = { ...vp, offsetX: vp.offsetX - e.deltaX, offsetY: vp.offsetY - e.deltaY }
@@ -337,8 +354,13 @@ export default function PDFAnnotator({ toolSettingsRef }: PDFAnnotatorProps) {
         case 'undo':     undo(); break
         case 'redo':     redo(); break
         case 'clear':    clearCanvas(); break
-        case 'zoom-in':  zoomAt(window.innerWidth / 2, window.innerHeight / 2, 1.2); break
-        case 'zoom-out': zoomAt(window.innerWidth / 2, window.innerHeight / 2, 1 / 1.2); break
+        case 'zoom-in':
+        case 'zoom-out': {
+          if (!container) break
+          const { width, height } = container.getBoundingClientRect()
+          zoomAt(width / 2, height / 2, action === 'zoom-in' ? 1.2 : 1 / 1.2)
+          break
+        }
         case 'zoom-reset': {
           if (!container || !pdfCanvas) break
           recenterViewport(pdfCanvas.width, pdfCanvas.height)
@@ -358,12 +380,10 @@ export default function PDFAnnotator({ toolSettingsRef }: PDFAnnotatorProps) {
 
   // ── Page navigation ───────────────────────────────────────────────────────
 
-  const { pages, activePage, activeNotebook, selectPage } = useNotebookStore((s) => ({
-    pages:          s.pages,
-    activePage:     s.activePage,
-    activeNotebook: s.activeNotebook,
-    selectPage:     s.selectPage,
-  }))
+  const pages          = useNotebookStore((s) => s.pages)
+  const activePage     = useNotebookStore((s) => s.activePage)
+  const activeNotebook = useNotebookStore((s) => s.activeNotebook)
+  const selectPage     = useNotebookStore((s) => s.selectPage)
 
   const currentIdx = pages.findIndex((p) => p.id === activePage?.id)
 

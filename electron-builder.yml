@@ -10,6 +10,12 @@ files:
   - out/**/*
   - "!**/*.map"
 
+# sql.js loads its WASM binary from process.resourcesPath in packaged builds
+# (see src/main/db.ts → locateFile)
+extraResources:
+  - from: node_modules/sql.js/dist/sql-wasm.wasm
+    to: sql-wasm.wasm
+
 win:
   target:
     - target: nsis

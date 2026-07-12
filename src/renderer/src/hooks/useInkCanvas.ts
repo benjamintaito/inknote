@@ -106,19 +106,11 @@ function drawImagesOnCtx(
   cache: Map<string, HTMLImageElement>,
   template: string
 ): void {
-  console.log('[IMG-RENDERER] drawImagesOnCtx llamado, images.length:', images.length, '| cache.size:', cache.size)
   if (images.length === 0) return
   const sorted = [...images].sort((a, b) => a.zIndex - b.zIndex)
   for (const img of sorted) {
     const el = cache.get(img.id)
-    const inCache   = el !== undefined
-    const isComplete = el?.complete ?? false
-    const natW       = el?.naturalWidth ?? -1
-    console.log('[IMG-RENDERER] drawImagesOnCtx img', img.id.slice(0, 8), '| inCache:', inCache, '| complete:', isComplete, '| naturalWidth:', natW)
-    if (!el || !el.complete || el.naturalWidth === 0) {
-      console.warn('[IMG-RENDERER] SKIP imagen', img.id.slice(0, 8), '— inCache:', inCache, 'complete:', isComplete, 'natW:', natW)
-      continue
-    }
+    if (!el || !el.complete || el.naturalWidth === 0) continue
     ctx.save()
     ctx.globalAlpha = img.opacity
     if (template === 'pdf') {
@@ -129,7 +121,6 @@ function drawImagesOnCtx(
     ctx.rotate((img.rotation * Math.PI) / 180)
     ctx.drawImage(el, -img.width / 2, -img.height / 2, img.width, img.height)
     ctx.restore()
-    console.log('[IMG-RENDERER] drawImagesOnCtx DIBUJADA imagen', img.id.slice(0, 8), 'en pos', img.x.toFixed(0), img.y.toFixed(0), 'size', img.width, 'x', img.height)
   }
 }
 
@@ -253,15 +244,19 @@ export function useInkCanvas(
 
   // ── Background redraw (triggered by undo/redo, with cache support) ────────────
 
-  const redrawBackground = useCallback((strokes: Stroke[]) => {
+  /**
+   * Redraw the full background canvas (template + images + strokes).
+   * @param syncStore When true (default) the store is updated and the page is
+   *                  marked dirty. Pass false for pure re-renders (e.g. an
+   *                  image finished loading) that don't change the data.
+   */
+  const redrawBackground = useCallback((strokes: Stroke[], syncStore = true) => {
     strokesBridgeRef.current = strokes
     const ctx = getBackgroundCtx()
     if (!ctx) return
 
     const template = currentTemplateRef.current
     const pdfMode  = template === 'pdf'
-
-    console.log('[PDF-BG] Limpiando canvas de fondo, template:', template, '| strokes:', strokes.length, '| images:', imagesBridgeRef.current.length)
 
     // Invalidate cache if undo went below frozen count
     if (frozenCanvasRef.current && strokes.length < frozenCountRef.current) {
@@ -278,8 +273,7 @@ export function useInkCanvas(
       drawImagesOnCtx(ctx, imagesBridgeRef.current, imageCacheRef.current, template)
       for (const s of strokes) renderStroke(ctx, s, 0, pdfMode)
     }
-    console.log('[PDF-BG] Re-renderizado completo, pdfMode:', pdfMode)
-    useNotebookStore.getState().setStrokes(strokes)
+    if (syncStore) useNotebookStore.getState().setStrokes(strokes)
   }, [])
 
   // ── onImagesChanged — called by useUndoRedo when images change via undo/redo ──
@@ -340,7 +334,8 @@ export function useInkCanvas(
       const el = new Image()
       el.onload = () => {
         imageCacheRef.current.set(img.id, el)
-        redrawBackground(strokesBridgeRef.current)
+        // Pure re-render: the page data didn't change, don't mark it dirty
+        redrawBackground(strokesBridgeRef.current, false)
       }
       el.src = dataUrl
     } catch {
@@ -353,20 +348,16 @@ export function useInkCanvas(
   /** Insert an image already saved to disk. Loads it, caches it, adds to undo. */
   const addImageToPage = useCallback(
     async (filePath: string, viewCenterX?: number, viewCenterY?: number): Promise<void> => {
-      console.log('[IMG-RENDERER] 1. addImageToPage llamado, filePath:', filePath)
-
       // Load data URL via IPC so the renderer can display it without file:// issues
       const dataUrl = await window.electronAPI.invoke<string | null>('image:read', { filePath })
-      console.log('[IMG-RENDERER] 2. Respuesta image:read:', dataUrl ? `OK (${dataUrl.length} chars)` : 'null — archivo no encontrado o error IPC')
       if (!dataUrl) {
-        console.error('[IMG-RENDERER] FALLO: image:read retornó null para', filePath)
+        console.error('[InkNote] image:read returned null for', filePath)
         return
       }
 
       await new Promise<void>((resolve) => {
         const el = new Image()
         el.onload = () => {
-          console.log('[IMG-RENDERER] 3. HTMLImageElement.onload disparado:', el.naturalWidth, 'x', el.naturalHeight, '| complete:', el.complete)
           const ow = el.naturalWidth
           const oh = el.naturalHeight
           // Default size: at most 800px wide (canvas px), preserving aspect ratio
@@ -390,24 +381,17 @@ export function useInkCanvas(
             locked:         false,
             zIndex:         imagesRef.current.length,
           }
-          console.log('[IMG-RENDERER] 3.5. PageImage creado id:', img.id, '| pos:', img.x.toFixed(0), img.y.toFixed(0), '| size:', img.width, 'x', img.height)
           imageCacheRef.current.set(img.id, el)
-          console.log('[IMG-RENDERER] 3.6. Cache actualizada, cache.size:', imageCacheRef.current.size)
           imagesBridgeRef.current = [...imagesBridgeRef.current, img]
-          console.log('[IMG-RENDERER] 3.7. imagesBridgeRef actualizado, length:', imagesBridgeRef.current.length)
           addImage(img)   // updates imagesRef + pushes undo + calls onImagesChanged
-          console.log('[IMG-RENDERER] 4. addImage() llamado, imagesRef.length:', imagesRef.current.length)
           resolve()
         }
-        el.onerror = (e) => {
-          console.error('[IMG-RENDERER] ERROR en HTMLImageElement.onerror:', e)
+        el.onerror = () => {
+          console.error('[InkNote] Failed to decode image:', filePath)
           resolve()
         }
-        console.log('[IMG-RENDERER] 2.5. Asignando dataUrl a Image.src (longitud:', dataUrl.length, ')...')
         el.src = dataUrl
-        console.log('[IMG-RENDERER] 2.6. Image.src asignado, complete inmediatamente:', el.complete)
       })
-      console.log('[IMG-RENDERER] 5. Promise resuelta — fin de addImageToPage')
     },
     [addImage, imagesRef]
   )
@@ -553,10 +537,13 @@ export function useInkCanvas(
 
   const handleStrokeStart = useCallback(
     (raw: RawPoint) => {
+      // Select and pan modes must not create strokes. toolRef only carries
+      // drawing settings, so check the actual active tool in the store.
+      const activeTool = useToolStore.getState().activeTool
+      if (activeTool === 'select' || activeTool === 'pan') return
+
       const tool = toolRef.current ?? DEFAULT_TOOL
       if (tool.tool === 'eraser') { handleEraserStart(raw); return }
-      // Select and pan tools must not create strokes
-      if (tool.tool === 'select' || tool.tool === 'pan') return
 
       const [cx, cy] = toCanvasCoords(raw.x, raw.y)
 
@@ -716,34 +703,9 @@ export function useInkCanvas(
     return () => { handlerRef.current?.dispose(); handlerRef.current = null }
   }, [containerRef, handleStrokeStart, handleStrokeMove, handleStrokeEnd])
 
-  // ── Keyboard shortcuts ────────────────────────────────────────────────────────
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.ctrlKey) {
-        if (e.key === 'z' && !e.shiftKey) { e.preventDefault(); undo(); return }
-        if (e.key === 'y' || (e.key === 'z' && e.shiftKey)) { e.preventDefault(); redo(); return }
-        if (e.key === 's') { e.preventDefault(); void useNotebookStore.getState().saveCurrentPage(); return }
-        if (e.key === 'n') { e.preventDefault(); window.dispatchEvent(new CustomEvent('inknote:new-notebook')); return }
-        if (e.key === 'e') { e.preventDefault(); window.dispatchEvent(new CustomEvent('ink:action', { detail: 'export' })); return }
-        return
-      }
-      // Non-ctrl tool shortcuts
-      if (e.key === 'p') { useToolStore.getState().setActiveTool('pen');       return }
-      if (e.key === 'h') { useToolStore.getState().setActiveTool('highlighter'); return }
-      if (e.key === 'e') { useToolStore.getState().setActiveTool('eraser');    return }
-      if (e.key === 'v' && !e.ctrlKey) { useToolStore.getState().setActiveTool('select'); return }
-      if (e.key === 'l' || e.key === 'L') {
-        const s = useToolStore.getState()
-        s.setStraightLine(!s.straightLine)
-        return
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [undo, redo])
-
   // ── Shift key tracking for straight-line angle snap ───────────────────────────
+  // (App-wide keyboard shortcuts live in useKeyboardShortcuts — this hook only
+  //  tracks Shift for the straight-line angle snap.)
 
   useEffect(() => {
     const down = (e: KeyboardEvent) => { if (e.key === 'Shift') shiftHeldRef.current = true }
