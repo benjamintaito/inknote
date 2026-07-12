@@ -205,7 +205,3 @@ through the Pointer Events API should work; a mouse works too.
 Contributions are welcome — feel free to open an issue or PR.
 
 ---
-
-## License
-
-[MIT](LICENSE) © Benjamín Taito
