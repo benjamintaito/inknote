@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState } from 'react'
-import { Pen } from 'lucide-react'
+import { Pen, AlertCircle, X } from 'lucide-react'
 import Toolbar from './components/Layout/Toolbar'
 import Sidebar from './components/Layout/Sidebar'
 import PageNavigator from './components/Layout/PageNavigator'
@@ -7,6 +7,7 @@ import MainArea from './components/MainArea'
 import ErrorBoundary from './components/ErrorBoundary'
 import { useToolStore, resolveInkSettings } from './stores/toolStore'
 import { useAppStore } from './stores/appStore'
+import { useNotebookStore } from './stores/notebookStore'
 import type { InkToolSettings } from './hooks/useInkCanvas'
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts'
 
@@ -44,6 +45,33 @@ function SplashScreen() {
           </div>
         </div>
       </div>
+    </div>
+  )
+}
+
+// ── Error toast (shows notebookStore.error: failed saves, imports, exports…) ──
+
+function ErrorToast() {
+  const error      = useNotebookStore((s) => s.error)
+  const clearError = useNotebookStore((s) => s.clearError)
+
+  useEffect(() => {
+    if (!error) return
+    const timer = setTimeout(clearError, 8000)
+    return () => clearTimeout(timer)
+  }, [error, clearError])
+
+  if (!error) return null
+  return (
+    <div
+      role="alert"
+      className="fixed bottom-28 left-1/2 -translate-x-1/2 z-50 flex items-start gap-2 max-w-md px-4 py-3 rounded-lg shadow-lg bg-red-600 text-white text-sm"
+    >
+      <AlertCircle size={16} className="shrink-0 mt-0.5" />
+      <span className="break-words">{error}</span>
+      <button onClick={clearError} className="shrink-0 opacity-80 hover:opacity-100" aria-label="Cerrar">
+        <X size={14} />
+      </button>
     </div>
   )
 }
@@ -89,6 +117,7 @@ export default function App() {
   return (
     <>
       {showSplash && <SplashScreen />}
+      <ErrorToast />
       <div className="flex flex-col h-full bg-surface-50 text-ink">
         <Toolbar />
         <div className="flex flex-1 overflow-hidden">

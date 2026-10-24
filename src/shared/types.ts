@@ -89,6 +89,7 @@ export interface PageMeta {
   height: number
   template: PageTemplate
   pdfPath: string | null
+  pdfPageIndex: number | null  // 0-based page of pdfPath shown on this page
   strokeDataPath: string | null
   thumbnailPath: string | null
   createdAt: string
@@ -140,6 +141,11 @@ export const IPC = {
   // OCR + Search
   OCR_SAVE:     'ocr:save',
   SEARCH_QUERY: 'search:query',
+
+  // Window lifecycle (send/on, not invoke): main asks the renderer to flush
+  // unsaved work before the window closes, renderer answers when done.
+  APP_BEFORE_CLOSE: 'app:before-close',
+  APP_CLOSE_READY:  'app:close-ready',
 } as const
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC]

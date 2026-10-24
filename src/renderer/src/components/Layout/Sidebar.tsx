@@ -3,6 +3,7 @@ import {
   Plus, ChevronDown, ChevronRight, BookOpen, Trash2, FileUp,
   Search, X, FolderPlus, Folder, MoreHorizontal, FolderOpen,
 } from 'lucide-react'
+import { useShallow } from 'zustand/react/shallow'
 import { useAppStore } from '../../stores/appStore'
 import { useNotebookStore } from '../../stores/notebookStore'
 import NotebookManager, { type NotebookCreateData } from '../Notebook/NotebookManager'
@@ -11,6 +12,10 @@ import type { FolderMeta, NotebookMeta, PageMeta, PageTemplate, SearchResult } f
 import { IPC } from '@shared/types'
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
+
+function reportError(e: unknown) {
+  useNotebookStore.setState({ error: e instanceof Error ? e.message : String(e) })
+}
 
 const FOLDER_COLORS = [
   '#6B7280', '#ef4444', '#f97316', '#eab308',
@@ -25,7 +30,7 @@ function PageItem({
   page: PageMeta; index: number; isActive: boolean
   onClick: () => void; onDelete: () => void
 }) {
-  const thumbUrl = useFileImage(page.thumbnailPath)
+  const thumbUrl = useFileImage(page.thumbnailPath, page.updatedAt)
   return (
     <li className="group relative">
       <button
@@ -368,6 +373,21 @@ function FolderSection({
 
 // ── Search results ─────────────────────────────────────────────────────────────
 
+/** Render an excerpt with «…»-marked matches highlighted (as React nodes,
+ *  never as HTML — the text comes from OCR and must not be interpreted). */
+function HighlightedExcerpt({ text }: { text: string }) {
+  const parts = text.split(/«(.*?)»/g)
+  return (
+    <>
+      {parts.map((part, i) =>
+        i % 2 === 1
+          ? <mark key={i} className="bg-yellow-100 rounded px-0.5">{part}</mark>
+          : <span key={i}>{part}</span>
+      )}
+    </>
+  )
+}
+
 function SearchResultItem({ result, onClick }: { result: SearchResult; onClick: () => void }) {
   return (
     <li>
@@ -375,10 +395,9 @@ function SearchResultItem({ result, onClick }: { result: SearchResult; onClick: 
         <div className="text-xs font-medium text-ink truncate">
           {result.notebookName} · Pág. {result.pageOrder + 1}
         </div>
-        <div
-          className="text-[10px] text-ink-soft leading-snug mt-0.5 line-clamp-2"
-          dangerouslySetInnerHTML={{ __html: result.excerpt.replace(/«(.*?)»/g, '<mark class="bg-yellow-100 rounded px-0.5">$1</mark>') }}
-        />
+        <div className="text-[10px] text-ink-soft leading-snug mt-0.5 line-clamp-2">
+          <HighlightedExcerpt text={result.excerpt} />
+        </div>
       </button>
     </li>
   )
@@ -422,7 +441,18 @@ export default function Sidebar() {
     createPage, selectPage, deletePage, importPDFFull,
     createFolder, updateFolder, deleteFolder, moveNotebookToFolder,
     searchQuery, searchResults, runSearch, clearSearch,
-  } = useNotebookStore()
+  } = useNotebookStore(useShallow((s) => ({
+    // Select only what's rendered — the store also changes on every stroke
+    folders: s.folders, notebooks: s.notebooks, activeNotebook: s.activeNotebook,
+    pages: s.pages, activePage: s.activePage, isLoading: s.isLoading,
+    fetchNotebooks: s.fetchNotebooks, createNotebook: s.createNotebook,
+    deleteNotebook: s.deleteNotebook, selectNotebook: s.selectNotebook,
+    createPage: s.createPage, selectPage: s.selectPage, deletePage: s.deletePage,
+    importPDFFull: s.importPDFFull, createFolder: s.createFolder,
+    updateFolder: s.updateFolder, deleteFolder: s.deleteFolder,
+    moveNotebookToFolder: s.moveNotebookToFolder, searchQuery: s.searchQuery,
+    searchResults: s.searchResults, runSearch: s.runSearch, clearSearch: s.clearSearch,
+  })))
 
   const [showManager, setShowManager] = useState(false)
   const [showNewFolder, setShowNewFolder] = useState(false)
@@ -439,9 +469,14 @@ export default function Sidebar() {
     searchDebounce.current = setTimeout(() => void runSearch(q), 300)
   }
 
-  const handleClearSearch = () => { setSearchInput(''); clearSearch() }
+  const handleClearSearch = () => {
+    if (searchDebounce.current) clearTimeout(searchDebounce.current)
+    setSearchInput('')
+    clearSearch()
+  }
 
   useEffect(() => { void fetchNotebooks() }, [fetchNotebooks])
+  useEffect(() => () => { if (searchDebounce.current) clearTimeout(searchDebounce.current) }, [])
 
   // Keep active notebook and its folder expanded
   useEffect(() => {
@@ -477,9 +512,9 @@ export default function Sidebar() {
 
   const handleNewPage = (notebookId: string, template?: PageTemplate) => {
     if (activeNotebook?.id !== notebookId) {
-      void selectNotebook(notebookId).then(() => createPage(template))
+      void selectNotebook(notebookId).then(() => createPage(template)).catch(reportError)
     } else {
-      void createPage(template)
+      void createPage(template).catch(reportError)
     }
   }
 
@@ -511,7 +546,11 @@ export default function Sidebar() {
     if (!filePath) return
     const filename = filePath.split(/[\\/]/).pop() ?? 'PDF'
     const name = filename.replace(/\.pdf$/i, '')
-    await importPDFFull(filePath, name)
+    try {
+      await importPDFFull(filePath, name)
+    } catch (e) {
+      reportError(`No se pudo importar el PDF: ${e instanceof Error ? e.message : String(e)}`)
+    }
   }
 
   // Group notebooks
@@ -533,9 +572,9 @@ export default function Sidebar() {
       onToggle={() => toggleNotebook(nb.id)}
       onNewPage={(t) => handleNewPage(nb.id, t)}
       onSelectPage={(page) => void selectPage(page)}
-      onDeletePage={(pageId) => void handleDeletePage(pageId)}
-      onDelete={() => void handleDeleteNotebook(nb.id)}
-      onMoveFolder={(fid) => void moveNotebookToFolder(nb.id, fid)}
+      onDeletePage={(pageId) => void handleDeletePage(pageId).catch(reportError)}
+      onDelete={() => void handleDeleteNotebook(nb.id).catch(reportError)}
+      onMoveFolder={(fid) => void moveNotebookToFolder(nb.id, fid).catch(reportError)}
     />
   )
 
@@ -577,7 +616,7 @@ export default function Sidebar() {
           {showNewFolder && (
             <div className="px-2 pb-1">
               <NewFolderForm
-                onSubmit={async (name) => { await createFolder(name); setShowNewFolder(false) }}
+                onSubmit={(name) => { void createFolder(name).then(() => setShowNewFolder(false)).catch(reportError) }}
                 onCancel={() => setShowNewFolder(false)}
               />
             </div>
@@ -638,12 +677,12 @@ export default function Sidebar() {
                     onToggleNotebook={toggleNotebook}
                     onNewPage={handleNewPage}
                     onSelectPage={(page) => void selectPage(page)}
-                    onDeletePage={(pageId) => void handleDeletePage(pageId)}
-                    onDeleteNotebook={(id) => void handleDeleteNotebook(id)}
-                    onMoveFolder={(nbId, fid) => void moveNotebookToFolder(nbId, fid)}
-                    onRenameFolder={(id, name) => void updateFolder(id, { name })}
-                    onDeleteFolder={(id) => void handleDeleteFolder(id)}
-                    onColorFolder={(id, color) => void updateFolder(id, { color })}
+                    onDeletePage={(pageId) => void handleDeletePage(pageId).catch(reportError)}
+                    onDeleteNotebook={(id) => void handleDeleteNotebook(id).catch(reportError)}
+                    onMoveFolder={(nbId, fid) => void moveNotebookToFolder(nbId, fid).catch(reportError)}
+                    onRenameFolder={(id, name) => void updateFolder(id, { name }).catch(reportError)}
+                    onDeleteFolder={(id) => void handleDeleteFolder(id).catch(reportError)}
+                    onColorFolder={(id, color) => void updateFolder(id, { color }).catch(reportError)}
                   />
                 ))}
 
@@ -658,7 +697,7 @@ export default function Sidebar() {
                         onDrop={(e) => {
                           e.preventDefault()
                           const nbId = e.dataTransfer.getData('notebookId')
-                          if (nbId) void moveNotebookToFolder(nbId, null)
+                          if (nbId) void moveNotebookToFolder(nbId, null).catch(reportError)
                         }}
                         onClick={() => setUnfolderExpanded((v) => !v)}
                       >
@@ -704,7 +743,7 @@ export default function Sidebar() {
       {showManager && (
         <NotebookManager
           onClose={() => setShowManager(false)}
-          onCreate={(data) => void handleCreate(data)}
+          onCreate={(data) => void handleCreate(data).catch(reportError)}
         />
       )}
     </>

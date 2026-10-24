@@ -16,6 +16,13 @@ type UndoAction =
 
 const MAX_HISTORY = 50
 
+export interface ImageUpdateOptions {
+  /** false = apply without recording an undo step (live drag preview). Default true. */
+  record?: boolean
+  /** Explicit "before" state, e.g. the image at drag start when committing a drag. */
+  before?: Partial<PageImage>
+}
+
 // ── Hook ───────────────────────────────────────────────────────────────────────
 
 export function useUndoRedo(
@@ -78,16 +85,16 @@ export function useUndoRedo(
   )
 
   const updateImage = useCallback(
-    (id: string, after: Partial<PageImage>) => {
+    (id: string, after: Partial<PageImage>, opts: ImageUpdateOptions = {}) => {
       const existing = images.current.find((i) => i.id === id)
       if (!existing) return
-      const before: Partial<PageImage> = {}
+      const before: Partial<PageImage> = { ...opts.before }
       for (const k of Object.keys(after) as (keyof PageImage)[]) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ;(before as any)[k] = existing[k]
+        if (!(k in before)) (before as any)[k] = existing[k]
       }
       images.current = images.current.map((i) => (i.id === id ? { ...i, ...after } : i))
-      pushUndo({ type: 'image-update', id, before, after })
+      if (opts.record !== false) pushUndo({ type: 'image-update', id, before, after })
       onImagesChanged?.(images.current)
     },
     [onImagesChanged]
@@ -99,40 +106,37 @@ export function useUndoRedo(
 
   // ── Undo ─────────────────────────────────────────────────────────────────────
 
+  // Each stack holds actions as originally performed: undo reverts the
+  // action and moves it to the redo stack, redo re-applies it and moves it back.
   const undo = useCallback(() => {
     const action = undoStack.current.pop()
     if (!action) return
+    redoStack.current.push(action)
     switch (action.type) {
       case 'add':
         strokes.current = strokes.current.filter((s) => s.id !== action.stroke.id)
-        redoStack.current.push({ type: 'remove', stroke: action.stroke })
         onStrokesChanged(strokes.current)
         break
       case 'remove':
         strokes.current = [...strokes.current, action.stroke]
-        redoStack.current.push({ type: 'add', stroke: action.stroke })
         onStrokesChanged(strokes.current)
         break
       case 'bulk-replace': {
         const addedIds = new Set(action.added.map((s) => s.id))
         strokes.current = [...strokes.current.filter((s) => !addedIds.has(s.id)), ...action.removed]
-        redoStack.current.push({ type: 'bulk-replace', removed: action.added, added: action.removed })
         onStrokesChanged(strokes.current)
         break
       }
       case 'image-add':
         images.current = images.current.filter((i) => i.id !== action.image.id)
-        redoStack.current.push({ type: 'image-remove', image: action.image })
         onImagesChanged?.(images.current)
         break
       case 'image-remove':
         images.current = [...images.current, action.image]
-        redoStack.current.push({ type: 'image-add', image: action.image })
         onImagesChanged?.(images.current)
         break
       case 'image-update':
         images.current = images.current.map((i) => i.id === action.id ? { ...i, ...action.before } : i)
-        redoStack.current.push({ type: 'image-update', id: action.id, before: action.after, after: action.before })
         onImagesChanged?.(images.current)
         break
     }
@@ -143,37 +147,32 @@ export function useUndoRedo(
   const redo = useCallback(() => {
     const action = redoStack.current.pop()
     if (!action) return
+    undoStack.current.push(action)
     switch (action.type) {
       case 'add':
         strokes.current = [...strokes.current, action.stroke]
-        undoStack.current.push({ type: 'remove', stroke: action.stroke })
         onStrokesChanged(strokes.current)
         break
       case 'remove':
         strokes.current = strokes.current.filter((s) => s.id !== action.stroke.id)
-        undoStack.current.push({ type: 'add', stroke: action.stroke })
         onStrokesChanged(strokes.current)
         break
       case 'bulk-replace': {
         const removedIds = new Set(action.removed.map((s) => s.id))
         strokes.current = [...strokes.current.filter((s) => !removedIds.has(s.id)), ...action.added]
-        undoStack.current.push({ type: 'bulk-replace', removed: action.added, added: action.removed })
         onStrokesChanged(strokes.current)
         break
       }
       case 'image-add':
         images.current = [...images.current, action.image]
-        undoStack.current.push({ type: 'image-remove', image: action.image })
         onImagesChanged?.(images.current)
         break
       case 'image-remove':
         images.current = images.current.filter((i) => i.id !== action.image.id)
-        undoStack.current.push({ type: 'image-add', image: action.image })
         onImagesChanged?.(images.current)
         break
       case 'image-update':
         images.current = images.current.map((i) => i.id === action.id ? { ...i, ...action.after } : i)
-        undoStack.current.push({ type: 'image-update', id: action.id, before: action.before, after: action.after })
         onImagesChanged?.(images.current)
         break
     }
@@ -182,9 +181,10 @@ export function useUndoRedo(
   // ── Clear ─────────────────────────────────────────────────────────────────────
 
   const clearAll = useCallback(() => {
+    // Recorded as a bulk replace so "clear page" can be undone
+    const removed = strokes.current
     strokes.current = []
-    undoStack.current = []
-    redoStack.current = []
+    if (removed.length > 0) pushUndo({ type: 'bulk-replace', removed, added: [] })
     onStrokesChanged([])
     // Images are intentionally NOT cleared by "clear page" (only ink strokes)
   }, [onStrokesChanged])

@@ -42,6 +42,9 @@ export function useKeyboardShortcuts(options: KeyboardShortcutsOptions = {}): vo
       if (e.ctrlKey || e.metaKey) {
         const key = e.key.toLowerCase()
 
+        // Leave text-field undo/redo to the browser
+        if (isTyping && (key === 'z' || key === 'y')) return
+
         if (key === 'z') {
           e.preventDefault()
           if (e.shiftKey) redo?.()
@@ -77,7 +80,7 @@ export function useKeyboardShortcuts(options: KeyboardShortcutsOptions = {}): vo
       }
 
       // ── Single-key shortcuts (skip while typing in form fields) ──────────────
-      if (isTyping) return
+      if (isTyping || e.altKey) return
 
       const { setActiveTool, setStraightLine, straightLine } = useToolStore.getState()
 

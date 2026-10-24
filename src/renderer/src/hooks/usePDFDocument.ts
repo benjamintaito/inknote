@@ -13,30 +13,39 @@ export function usePDFDocument() {
   const docRef = useRef<PDFDocumentProxy | null>(null)
   const cacheRef = useRef<Map<number, PDFPageProxy>>(new Map())
   const renderTaskRef = useRef<RenderTask | null>(null)
+  const loadSeqRef = useRef(0)
   const [totalPages, setTotalPages] = useState(0)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const loadPDF = useCallback(async (bytes: Uint8Array) => {
+    const seq = ++loadSeqRef.current
     setIsLoading(true)
     setError(null)
     try {
       if (docRef.current) {
-        await docRef.current.destroy()
+        const old = docRef.current
         docRef.current = null
+        await old.destroy()
       }
       cacheRef.current.clear()
       // Defensive: ensure we have a proper Uint8Array (IPC may send a plain object)
       const safeBytes = bytes instanceof Uint8Array ? bytes : new Uint8Array(Object.values(bytes as unknown as Record<string, number>))
-      const loadingTask = getDocument({ data: safeBytes })
+      // isEvalSupported: false — never compile font programs with eval
+      // (mitigates CVE-2024-4367 in pdf.js < 4.2)
+      const loadingTask = getDocument({ data: safeBytes, isEvalSupported: false })
       const doc = await loadingTask.promise
+      // A newer loadPDF call superseded this one
+      if (seq !== loadSeqRef.current) { void doc.destroy(); return }
       docRef.current = doc
       setTotalPages(doc.numPages)
     } catch (e) {
+      if (seq !== loadSeqRef.current) return
       console.error('[InkNote] Failed to load PDF:', e)
       setError(String(e))
+      throw e
     } finally {
-      setIsLoading(false)
+      if (seq === loadSeqRef.current) setIsLoading(false)
     }
   }, [])
 

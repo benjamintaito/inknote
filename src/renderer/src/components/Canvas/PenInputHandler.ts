@@ -72,6 +72,8 @@ export class PenInputHandler {
   private readonly onDown = (e: PointerEvent): void => {
     // Only pen/mouse can start strokes — touch is handled by TouchGestureHandler
     if (e.pointerType === 'touch') return
+    // Mouse: only the primary button draws (right-click is for context menus)
+    if (e.pointerType === 'mouse' && e.button !== 0) return
     // Only start a new stroke when idle
     if (this.activePointerId !== null) return
     if (this.palm && !this.palm.shouldProcess(e)) return

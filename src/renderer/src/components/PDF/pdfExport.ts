@@ -1,11 +1,10 @@
 import { IPC } from '@shared/types'
 import type { PageMeta, PageImage, StrokeFile } from '@shared/types'
+import type { PDFDocument, PDFPage } from 'pdf-lib'
 import { renderStroke } from '../Canvas/StrokeRenderer'
 import { renderTemplate } from '../Notebook/PageTemplates'
 import { PDF_RENDER_SCALE } from '../../hooks/usePDFDocument'
 import { useNotebookStore } from '../../stores/notebookStore'
-import type { PDFDocumentProxy } from 'pdfjs-dist'
-import type { RefObject } from 'react'
 
 function ipc<T>(channel: string, data?: unknown): Promise<T> {
   return window.electronAPI.invoke<T>(channel, data)
@@ -41,90 +40,147 @@ async function drawImages(ctx: CanvasRenderingContext2D, images: PageImage[]): P
   }
 }
 
+/** Rasterize template + images + strokes into PNG bytes. */
+async function renderAnnotationPng(
+  width: number,
+  height: number,
+  template: PageMeta['template'],
+  strokes: StrokeFile['strokes'],
+  images: PageImage[]
+): Promise<Uint8Array> {
+  const offscreen = new OffscreenCanvas(width, height)
+  const ctx = offscreen.getContext('2d') as unknown as CanvasRenderingContext2D
+  renderTemplate(ctx, template, width, height)
+  await drawImages(ctx, images)
+  const pdfMode = template === 'pdf'
+  for (const stroke of strokes) renderStroke(ctx, stroke, 0, pdfMode)
+  const blob = await offscreen.convertToBlob({ type: 'image/png' })
+  return new Uint8Array(await blob.arrayBuffer())
+}
+
+// ── PDF page geometry ──────────────────────────────────────────────────────────
+
+/**
+ * Overlay an annotation image onto a (possibly rotated) PDF page.
+ *
+ * Annotations were drawn on the page as pdf.js displays it: crop box, with
+ * /Rotate applied. pdf-lib draws in unrotated user space, so the image has
+ * to be counter-rotated and anchored at the corner that ends up top-left.
+ */
+function displaySize(page: PDFPage): { width: number; height: number; rotation: number } {
+  const box = page.getCropBox()
+  const rotation = ((page.getRotation().angle % 360) + 360) % 360
+  const swap = rotation === 90 || rotation === 270
+  return {
+    width:  swap ? box.height : box.width,
+    height: swap ? box.width  : box.height,
+    rotation,
+  }
+}
+
+async function drawOverlay(doc: PDFDocument, page: PDFPage, png: Uint8Array): Promise<void> {
+  const { degrees } = await import('pdf-lib')
+  const image = await doc.embedPng(png)
+  const box = page.getCropBox()
+  const { width, height, rotation } = displaySize(page)
+  // Bottom-left corner of the displayed page, expressed in user space
+  const origin =
+    rotation === 90  ? { x: box.x + box.width, y: box.y } :
+    rotation === 180 ? { x: box.x + box.width, y: box.y + box.height } :
+    rotation === 270 ? { x: box.x,             y: box.y + box.height } :
+                       { x: box.x,             y: box.y }
+  page.drawImage(image, { ...origin, width, height, rotate: degrees(rotation) })
+}
+
 // ── Export ─────────────────────────────────────────────────────────────────────
+
+let exportInProgress = false
 
 /**
  * Export a notebook as a PDF with all annotations (strokes + inserted images)
  * rasterized as a PNG overlay per page.
  *
- * - PDF notebooks: annotations are drawn on top of the original PDF pages.
- * - Regular notebooks: pages are created from scratch with their templates.
+ * Pages are exported in notebook order:
+ * - PDF-backed pages copy their source PDF page and get the overlay on top.
+ * - Regular pages are created from scratch with their template.
+ *
+ * Errors are reported through the notebook store's `error` field.
  */
 export async function exportAnnotatedPDF(
   notebookId: string,
   notebookName: string,
-  pages: PageMeta[],
-  pdfDocRef: RefObject<PDFDocumentProxy | null>
+  pages: PageMeta[]
 ): Promise<void> {
-  const savePath = await ipc<string | null>(IPC.PDF_EXPORT_DIALOG, { defaultName: `${notebookName}-anotado.pdf` })
-  if (!savePath) return
-
-  if (pages.length === 0) {
-    throw new Error('No se pudo exportar: el cuaderno no tiene páginas.')
-  }
-
-  // Flush any unsaved strokes so the export reflects what's on screen
-  await useNotebookStore.getState().saveCurrentPage()
-
-  const { PDFDocument } = await import('pdf-lib')
-  const isPDFNotebook = pages[0].pdfPath !== null
-
-  let outputDoc: import('pdf-lib').PDFDocument
-  if (isPDFNotebook && pages[0].pdfPath) {
-    const srcBytes = await ipc<Uint8Array>(IPC.PDF_READ_BYTES, { filePath: pages[0].pdfPath })
-    outputDoc = await PDFDocument.load(srcBytes)
-  } else {
-    outputDoc = await PDFDocument.create()
-  }
-
-  for (const [i, page] of pages.entries()) {
-    const strokeFile = await ipc<StrokeFile | null>(IPC.PAGE_LOAD, { notebookId, pageId: page.id })
-    const strokes = strokeFile?.strokes ?? []
-    const images  = strokeFile?.images ?? []
-
-    let canvasW: number, canvasH: number, outputPage: import('pdf-lib').PDFPage
-
-    if (isPDFNotebook) {
-      if (!pdfDocRef.current) {
-        throw new Error('No se pudo exportar: el documento PDF no está cargado.')
-      }
-      // Use PDF dimensions from pdfjs document
-      const pdfPage = await pdfDocRef.current.getPage(i + 1)
-      const vp = pdfPage.getViewport({ scale: PDF_RENDER_SCALE })
-      canvasW = Math.round(vp.width)
-      canvasH = Math.round(vp.height)
-      outputPage = outputDoc.getPages()[i]
-    } else {
-      // Non-PDF page: use stored dimensions (in 300DPI pixels)
-      canvasW = page.width
-      canvasH = page.height
-      const ptW = Math.round(page.width * 72 / 300)
-      const ptH = Math.round(page.height * 72 / 300)
-      outputPage = outputDoc.addPage([ptW, ptH])
+  if (exportInProgress) return
+  exportInProgress = true
+  try {
+    if (pages.length === 0) {
+      throw new Error('el cuaderno no tiene páginas.')
     }
 
-    // Skip pages with nothing to overlay (keeps the original PDF page clean)
-    if (strokes.length === 0 && images.length === 0 && isPDFNotebook) continue
+    const savePath = await ipc<string | null>(IPC.PDF_EXPORT_DIALOG, { defaultName: `${notebookName}-anotado.pdf` })
+    if (!savePath) return
 
-    // Render template + images + strokes to an OffscreenCanvas
-    // (transparent background for PDF pages, template for others)
-    const offscreen = new OffscreenCanvas(canvasW, canvasH)
-    const ctx = offscreen.getContext('2d') as unknown as CanvasRenderingContext2D
-    const template = isPDFNotebook ? 'pdf' as const : page.template
-    renderTemplate(ctx, template, canvasW, canvasH)
-    await drawImages(ctx, images)
-    const pdfMode = template === 'pdf'
-    for (const stroke of strokes) renderStroke(ctx, stroke, 0, pdfMode)
+    // Flush any unsaved strokes so the export reflects what's on screen
+    await useNotebookStore.getState().saveCurrentPage()
 
-    // Export as PNG and embed
-    const blob = await (offscreen as unknown as { convertToBlob(opts?: unknown): Promise<Blob> })
-      .convertToBlob({ type: 'image/png' })
-    const pngBytes = new Uint8Array(await blob.arrayBuffer())
-    const pngImage = await outputDoc.embedPng(pngBytes)
-    const { width: outW, height: outH } = outputPage.getSize()
-    outputPage.drawImage(pngImage, { x: 0, y: 0, width: outW, height: outH })
+    const { PDFDocument: PDFDoc } = await import('pdf-lib')
+    const outputDoc = await PDFDoc.create()
+    const sourceDocs = new Map<string, PDFDocument>()
+
+    const loadSource = async (path: string): Promise<PDFDocument> => {
+      let doc = sourceDocs.get(path)
+      if (!doc) {
+        const bytes = await ipc<Uint8Array>(IPC.PDF_READ_BYTES, { filePath: path })
+        doc = await PDFDoc.load(bytes, { ignoreEncryption: true })
+        sourceDocs.set(path, doc)
+      }
+      return doc
+    }
+
+    for (const page of pages) {
+      const strokeFile = await ipc<StrokeFile | null>(IPC.PAGE_LOAD, { notebookId, pageId: page.id })
+      const strokes = strokeFile?.strokes ?? []
+      const images  = strokeFile?.images ?? []
+      const hasAnnotations = strokes.length > 0 || images.length > 0
+
+      if (page.pdfPath) {
+        const src = await loadSource(page.pdfPath)
+        const index = page.pdfPageIndex ?? page.pageOrder
+        if (index < 0 || index >= src.getPageCount()) {
+          throw new Error(`la página ${index + 1} no existe en el PDF original.`)
+        }
+        const [copied] = await outputDoc.copyPages(src, [index])
+        outputDoc.addPage(copied)
+
+        // Keep pages without annotations untouched
+        if (!hasAnnotations) continue
+
+        // Same canvas size the annotator used (pdf.js viewport at PDF_RENDER_SCALE)
+        const { width, height } = displaySize(copied)
+        const png = await renderAnnotationPng(
+          Math.floor(width * PDF_RENDER_SCALE),
+          Math.floor(height * PDF_RENDER_SCALE),
+          'pdf', strokes, images
+        )
+        await drawOverlay(outputDoc, copied, png)
+      } else {
+        // Non-PDF page: stored dimensions are 300 DPI pixels
+        const ptW = Math.round(page.width * 72 / 300)
+        const ptH = Math.round(page.height * 72 / 300)
+        const outputPage = outputDoc.addPage([ptW, ptH])
+        const png = await renderAnnotationPng(page.width, page.height, page.template, strokes, images)
+        await drawOverlay(outputDoc, outputPage, png)
+      }
+    }
+
+    const outputBytes = await outputDoc.save()
+    await ipc(IPC.PDF_EXPORT_SAVE, { filePath: savePath, bytes: outputBytes })
+  } catch (e) {
+    console.error('[InkNote] PDF export failed:', e)
+    const msg = e instanceof Error ? e.message : String(e)
+    useNotebookStore.setState({ error: `No se pudo exportar el PDF: ${msg}` })
+  } finally {
+    exportInProgress = false
   }
-
-  const outputBytes = await outputDoc.save()
-  await ipc(IPC.PDF_EXPORT_SAVE, { filePath: savePath, bytes: Array.from(outputBytes) })
 }

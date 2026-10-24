@@ -24,5 +24,5 @@ export function readFileBytes(filePath: string): Buffer {
 }
 
 export function writePDFBytes(filePath: string, bytes: Uint8Array): void {
-  writeFileSync(filePath, Buffer.from(bytes))
+  writeFileSync(filePath, Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength))
 }

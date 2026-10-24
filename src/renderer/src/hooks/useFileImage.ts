@@ -8,7 +8,7 @@ import { IPC } from '@shared/types'
  * the app is served over http in dev), so thumbnails and other local images
  * must go through the `image:read` channel instead.
  */
-export function useFileImage(filePath: string | null): string | null {
+export function useFileImage(filePath: string | null, version?: string): string | null {
   const [dataUrl, setDataUrl] = useState<string | null>(null)
 
   useEffect(() => {
@@ -22,7 +22,9 @@ export function useFileImage(filePath: string | null): string | null {
       .then((url) => { if (!cancelled) setDataUrl(url) })
       .catch(() => { if (!cancelled) setDataUrl(null) })
     return () => { cancelled = true }
-  }, [filePath])
+  // `version` (e.g. the page's updatedAt) forces a reload when the file is
+  // rewritten in place under the same path
+  }, [filePath, version])
 
   return dataUrl
 }

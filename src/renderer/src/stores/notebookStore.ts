@@ -18,6 +18,8 @@ function ipc<T>(channel: string, data?: unknown): Promise<T> {
 // ── Auto-save debounce ─────────────────────────────────────────────────────────
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null
+/** The save currently being written, so later saves can wait for it. */
+let inFlightSave: Promise<void> | null = null
 
 function clearSaveTimer() {
   if (saveTimer !== null) { clearTimeout(saveTimer); saveTimer = null }
@@ -184,6 +186,10 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
 
   deleteNotebook: async (id) => {
     await ipc(IPC.NOTEBOOK_DELETE, { id })
+    if (get().activeNotebook?.id === id) {
+      clearSaveTimer()
+      set({ isDirty: false })
+    }
     set((s) => ({
       notebooks:      s.notebooks.filter((n) => n.id !== id),
       activeNotebook: s.activeNotebook?.id === id ? null : s.activeNotebook,
@@ -198,9 +204,16 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
     const nb = get().notebooks.find((n) => n.id === id) ?? null
     if (!nb) return
 
-    set({ activeNotebook: nb, isLoading: true, activePage: null, strokes: [], images: [] })
+    // Flush the outgoing page: its pending auto-save would otherwise be
+    // dropped once activePage is cleared below.
+    await get().saveCurrentPage()
+
+    set({ activeNotebook: nb, isLoading: true, activePage: null, strokes: [], images: [], isDirty: false })
+    clearSaveTimer()
     try {
       const pages = await ipc<PageMeta[]>(IPC.PAGE_LIST, { notebookId: id })
+      // Another notebook was selected while this one was loading
+      if (get().activeNotebook?.id !== id) return
       set({ pages, isLoading: false })
 
       // Auto-select first page if available
@@ -237,8 +250,8 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
   },
 
   selectPage: async (page) => {
-    // Save current page before switching if dirty
-    if (get().isDirty) await get().saveCurrentPage()
+    // Save current page before switching (also waits for an in-flight save)
+    await get().saveCurrentPage()
 
     set({ activePage: page, isLoading: true, strokes: [], images: [], isDirty: false })
     clearSaveTimer()
@@ -251,8 +264,11 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
         notebookId: activeNotebook.id,
         pageId: page.id,
       })
+      // A later selectPage won the race: don't put this page's strokes on it
+      if (get().activePage?.id !== page.id) return
       set({ strokes: file?.strokes ?? [], images: file?.images ?? [], isLoading: false })
     } catch (e) {
+      if (get().activePage?.id !== page.id) return
       set({ error: String(e), isLoading: false })
     }
   },
@@ -289,12 +305,16 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
   // ── Strokes + images + auto-save ──────────────────────────────────────────────
 
   setStrokes: (strokes) => {
+    // While a page is loading the canvas may still hold the previous page's
+    // data; never let it leak into the incoming page.
+    if (get().isLoading) return
     set({ strokes, isDirty: true })
     clearSaveTimer()
     saveTimer = setTimeout(() => void get().saveCurrentPage(), 3000)
   },
 
   setImages: (images) => {
+    if (get().isLoading) return
     set({ images, isDirty: true })
     clearSaveTimer()
     saveTimer = setTimeout(() => void get().saveCurrentPage(), 3000)
@@ -302,27 +322,42 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
 
   saveCurrentPage: async () => {
     clearSaveTimer()
-    const { activeNotebook, activePage, strokes, images, isSaving } = get()
-    if (!activeNotebook || !activePage || isSaving) return
+    // Serialize saves: wait for the one in flight, then write the latest state
+    while (inFlightSave) await inFlightSave
 
-    set({ isSaving: true })
+    const { activeNotebook, activePage, strokes, images, isDirty } = get()
+    if (!activeNotebook || !activePage || !isDirty) return
+
+    const save = (async () => {
+      set({ isSaving: true })
+      try {
+        await ipc(IPC.PAGE_SAVE_STROKES, {
+          notebookId: activeNotebook.id,
+          pageId:     activePage.id,
+          strokes,
+          images,
+          metadata: {
+            template: activePage.template,
+            width:    activePage.width,
+            height:   activePage.height,
+          },
+        })
+        // Only mark clean if nothing changed while the write was in flight
+        const s = get()
+        if (s.activePage?.id === activePage.id && s.strokes === strokes && s.images === images) {
+          set({ isDirty: false })
+        }
+      } catch (e) {
+        set({ error: `No se pudo guardar la página: ${String(e)}` })
+      } finally {
+        set({ isSaving: false })
+      }
+    })()
+    inFlightSave = save
     try {
-      await ipc(IPC.PAGE_SAVE_STROKES, {
-        notebookId: activeNotebook.id,
-        pageId:     activePage.id,
-        strokes,
-        images,
-        metadata: {
-          template: activePage.template,
-          width:    activePage.width,
-          height:   activePage.height,
-        },
-      })
-      set({ isDirty: false })
-    } catch (e) {
-      set({ error: String(e) })
+      await save
     } finally {
-      set({ isSaving: false })
+      if (inFlightSave === save) inFlightSave = null
     }
   },
 
@@ -331,19 +366,28 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
     const notebookId = target?.notebookId ?? activeNotebook?.id
     const pageId     = target?.pageId     ?? activePage?.id
     if (!notebookId || !pageId) return
-    const { thumbnailPath } = await ipc<{ thumbnailPath: string }>(
-      IPC.PAGE_SAVE_THUMBNAIL, { notebookId, pageId, base64 }
-    )
-    // Refresh thumbnailPath locally so sidebar/navigator previews update
-    set((s) => ({
-      pages: s.pages.map((p) => (p.id === pageId ? { ...p, thumbnailPath } : p)),
-    }))
+    try {
+      const result = await ipc<{ thumbnailPath: string; updatedAt: string } | null>(
+        IPC.PAGE_SAVE_THUMBNAIL, { notebookId, pageId, base64 }
+      )
+      if (!result) return  // page was deleted meanwhile
+      // Refresh locally so sidebar/navigator previews update (updatedAt
+      // changes even when the path doesn't, which forces a reload)
+      set((s) => ({
+        pages: s.pages.map((p) => (p.id === pageId ? { ...p, ...result } : p)),
+      }))
+    } catch (e) {
+      console.error('[InkNote] Failed to save thumbnail:', e)
+    }
   },
 
   // ── PDF import ─────────────────────────────────────────────────────────────────
 
   importPDFFull: async (sourcePath, name) => {
     const result = await ipc<PDFImportResult>(IPC.PDF_IMPORT_FULL, { sourcePath, name })
+    // Flush the outgoing page before replacing the active notebook
+    await get().saveCurrentPage()
+    clearSaveTimer()
     set((s) => ({ notebooks: [result.notebook, ...s.notebooks] }))
     set({ activeNotebook: result.notebook, pages: result.pages, activePage: null, strokes: [], images: [], isDirty: false, isLoading: false })
     if (result.pages.length > 0) {
@@ -407,8 +451,14 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
 
 // ── Save on window close (flush any pending auto-save) ────────────────────────
 
+// The main process keeps the window open until we confirm the flush is done.
+window.electronAPI.on(IPC.APP_BEFORE_CLOSE, () => {
+  void useNotebookStore.getState().saveCurrentPage()
+    .finally(() => window.electronAPI.send(IPC.APP_CLOSE_READY))
+})
+
+// Reloads don't go through the close handshake, so this is best effort only.
 window.addEventListener('beforeunload', () => {
-  clearSaveTimer()
   const { isDirty, saveCurrentPage } = useNotebookStore.getState()
   if (isDirty) void saveCurrentPage()
 })

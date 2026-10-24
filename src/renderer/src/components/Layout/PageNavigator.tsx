@@ -1,8 +1,13 @@
 import { useRef, useEffect } from 'react'
 import { Plus, Trash2 } from 'lucide-react'
+import { useShallow } from 'zustand/react/shallow'
 import { useNotebookStore } from '../../stores/notebookStore'
 import { useFileImage } from '../../hooks/useFileImage'
 import type { PageMeta } from '@shared/types'
+
+function reportError(e: unknown) {
+  useNotebookStore.setState({ error: e instanceof Error ? e.message : String(e) })
+}
 
 // ── Page card ─────────────────────────────────────────────────────────────────
 
@@ -20,7 +25,7 @@ function PageCard({
   onDelete: () => void
 }) {
   const ref = useRef<HTMLButtonElement>(null)
-  const thumbUrl = useFileImage(page.thumbnailPath)
+  const thumbUrl = useFileImage(page.thumbnailPath, page.updatedAt)
 
   // Scroll active page into view when it changes
   useEffect(() => {
@@ -70,8 +75,12 @@ function PageCard({
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function PageNavigator() {
+  // Select only what's rendered — the store also changes on every stroke
   const { pages, activePage, activeNotebook, selectPage, createPage, deletePage } =
-    useNotebookStore()
+    useNotebookStore(useShallow((s) => ({
+      pages: s.pages, activePage: s.activePage, activeNotebook: s.activeNotebook,
+      selectPage: s.selectPage, createPage: s.createPage, deletePage: s.deletePage,
+    })))
 
   const handleDelete = async (pageId: string) => {
     if (!confirm('¿Eliminar esta página?')) return
@@ -91,14 +100,14 @@ export default function PageNavigator() {
             index={i}
             isActive={activePage?.id === p.id}
             onClick={() => void selectPage(p)}
-            onDelete={() => void handleDelete(p.id)}
+            onDelete={() => void handleDelete(p.id).catch(reportError)}
           />
         ))}
       </ul>
 
       {/* Add page button */}
       <button
-        onClick={() => void createPage()}
+        onClick={() => void createPage().catch(reportError)}
         className="shrink-0 flex flex-col items-center justify-center gap-1 w-16 h-[72px] rounded-lg border-2 border-dashed border-surface-200 text-ink-soft hover:border-blue-300 hover:text-blue-500 transition-colors"
         title="Nueva página"
       >

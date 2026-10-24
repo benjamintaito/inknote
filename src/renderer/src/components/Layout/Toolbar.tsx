@@ -226,19 +226,19 @@ function ZoomControls() {
 
   return (
     <div className="flex items-center gap-0.5 shrink-0">
-      <IconBtn title="Reducir zoom (Ctrl+−)" onClick={() => inkAction('zoom-out')}>
+      <IconBtn title="Reducir zoom (Ctrl+rueda)" onClick={() => inkAction('zoom-out')}>
         <ZoomOut size={15} />
       </IconBtn>
 
       <button
-        title="Restablecer zoom (Ctrl+0)"
+        title="Ajustar a la ventana"
         onClick={() => inkAction('zoom-reset')}
         className="w-12 h-7 text-xs font-mono text-ink-soft hover:text-ink hover:bg-surface-100 rounded transition-colors"
       >
         {zoom}%
       </button>
 
-      <IconBtn title="Aumentar zoom (Ctrl+=)" onClick={() => inkAction('zoom-in')}>
+      <IconBtn title="Aumentar zoom (Ctrl+rueda)" onClick={() => inkAction('zoom-in')}>
         <ZoomIn size={15} />
       </IconBtn>
     </div>

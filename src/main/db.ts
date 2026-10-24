@@ -52,10 +52,10 @@ function one(sql: string, params: SqlValue[] = []): Row | null {
   return row
 }
 
-/** INSERT / UPDATE / DELETE */
+/** INSERT / UPDATE / DELETE (persisted immediately unless inside batch()) */
 function run(sql: string, params: SqlValue[] = []): void {
   assertDb().run(sql, params)
-  persist()
+  if (batchDepth === 0) persist()
 }
 
 /** Run multiple statements (DDL) without persisting on each */
@@ -63,17 +63,27 @@ function exec(sql: string): void {
   assertDb().exec(sql)
 }
 
-/** Wrap several run() calls in a transaction */
-function transaction(fn: (r: (sql: string, p?: SqlValue[]) => void) => void): void {
+let batchDepth = 0
+
+/**
+ * Run several mutations in one transaction and persist once at the end.
+ * Not re-entrant: nested calls simply join the outer transaction.
+ */
+export function batch<T>(fn: () => T): T {
   const d = assertDb()
+  if (batchDepth > 0) return fn()
   d.run('BEGIN')
+  batchDepth++
   try {
-    fn((sql, p) => d.run(sql, p))
+    const result = fn()
     d.run('COMMIT')
-    persist()
+    return result
   } catch (e) {
     d.run('ROLLBACK')
     throw e
+  } finally {
+    batchDepth--
+    persist()
   }
 }
 
@@ -138,6 +148,13 @@ function runMigrations(): void {
   const nbCols = all('PRAGMA table_info(notebooks)')
   if (!nbCols.some((c) => c['name'] === 'folder_id')) {
     exec('ALTER TABLE notebooks ADD COLUMN folder_id TEXT REFERENCES folders(id)')
+  }
+
+  // Add pdf_page_index: which page of the source PDF a page shows. Older DBs
+  // derived it from page_order, so backfill from there (keeps what users saw).
+  if (!pageCols.some((c) => c['name'] === 'pdf_page_index')) {
+    exec('ALTER TABLE pages ADD COLUMN pdf_page_index INTEGER')
+    exec('UPDATE pages SET pdf_page_index = page_order WHERE pdf_path IS NOT NULL')
   }
 }
 
@@ -212,6 +229,7 @@ function toPage(r: Row): PageMeta {
     height:          r['height'] as number,
     template:        r['template'] as PageTemplate,
     pdfPath:         r['pdf_path'] as string | null,
+    pdfPageIndex:    (r['pdf_page_index'] as number | null) ?? null,
     strokeDataPath:  r['stroke_data_path'] as string | null,
     thumbnailPath:   r['thumbnail_path'] as string | null,
     createdAt:       r['created_at'] as string,
@@ -253,8 +271,10 @@ export function updateFolder(
 
 export function deleteFolder(id: string): void {
   // Detach notebooks first (SQLite doesn't support ON DELETE SET NULL easily)
-  run('UPDATE notebooks SET folder_id = NULL WHERE folder_id = ?', [id])
-  run('DELETE FROM folders WHERE id = ?', [id])
+  batch(() => {
+    run('UPDATE notebooks SET folder_id = NULL WHERE folder_id = ?', [id])
+    run('DELETE FROM folders WHERE id = ?', [id])
+  })
 }
 
 // ── Notebooks ──────────────────────────────────────────────────────────────────
@@ -314,25 +334,33 @@ export function getNotebookCategories(): string[] {
 
 export function createPage(data: {
   id: string; notebookId: string; template: PageTemplate; width: number; height: number
+  pdfPath?: string | null; pdfPageIndex?: number | null
 }): PageMeta {
   const now = new Date().toISOString()
   const r = one('SELECT MAX(page_order) AS m FROM pages WHERE notebook_id = ?', [data.notebookId])
   const order = ((r?.['m'] as number | null) ?? -1) + 1
+  const pdfPath      = data.pdfPath ?? null
+  const pdfPageIndex = data.pdfPageIndex ?? null
 
   run(
     `INSERT INTO pages
        (id, notebook_id, page_order, width, height, template,
-        pdf_path, stroke_data_path, thumbnail_path, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)`,
-    [data.id, data.notebookId, order, data.width, data.height, data.template, now, now]
+        pdf_path, pdf_page_index, stroke_data_path, thumbnail_path, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
+    [data.id, data.notebookId, order, data.width, data.height, data.template,
+     pdfPath, pdfPageIndex, now, now]
   )
 
   return {
     id: data.id, notebookId: data.notebookId, pageOrder: order,
     width: data.width, height: data.height, template: data.template,
-    pdfPath: null, strokeDataPath: null, thumbnailPath: null,
+    pdfPath, pdfPageIndex, strokeDataPath: null, thumbnailPath: null,
     createdAt: now, updatedAt: now,
   }
+}
+
+export function pageExists(id: string): boolean {
+  return one('SELECT 1 AS x FROM pages WHERE id = ?', [id]) !== null
 }
 
 export function getPages(notebookId: string): PageMeta[] {
@@ -348,9 +376,9 @@ export function deletePage(id: string): void {
 
 export function reorderPages(notebookId: string, pageIds: string[]): void {
   const now = new Date().toISOString()
-  transaction((r) => {
+  batch(() => {
     pageIds.forEach((id, i) =>
-      r('UPDATE pages SET page_order = ?, updated_at = ? WHERE id = ? AND notebook_id = ?',
+      run('UPDATE pages SET page_order = ?, updated_at = ? WHERE id = ? AND notebook_id = ?',
         [i, now, id, notebookId])
     )
   })
@@ -359,17 +387,18 @@ export function reorderPages(notebookId: string, pageIds: string[]): void {
 export function updatePagePaths(
   id: string,
   paths: Partial<{ strokeDataPath: string; thumbnailPath: string; pdfPath: string }>
-): void {
+): string | null {
   const now = new Date().toISOString()
   const sets: string[] = []
   const vals: SqlValue[] = []
   if (paths.strokeDataPath !== undefined) { sets.push('stroke_data_path = ?'); vals.push(paths.strokeDataPath) }
   if (paths.thumbnailPath  !== undefined) { sets.push('thumbnail_path = ?');   vals.push(paths.thumbnailPath) }
   if (paths.pdfPath        !== undefined) { sets.push('pdf_path = ?');         vals.push(paths.pdfPath) }
-  if (sets.length === 0) return
+  if (sets.length === 0) return null
   sets.push('updated_at = ?')
   vals.push(now, id)
   run(`UPDATE pages SET ${sets.join(', ')} WHERE id = ?`, vals)
+  return now
 }
 
 // ── OCR + Search ────────────────────────────────────────────────────────────────

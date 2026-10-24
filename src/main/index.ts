@@ -1,8 +1,9 @@
-import { app, BrowserWindow, dialog, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
 import { initDb, closeDb } from './db.js'
 import { registerIpcHandlers } from './ipc-handlers.js'
+import { IPC } from '../shared/types.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -27,8 +28,36 @@ function createWindow(): void {
   mainWindow.on('ready-to-show', () => mainWindow.show())
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url)
+    if (/^https?:\/\//i.test(url)) void shell.openExternal(url)
     return { action: 'deny' }
+  })
+
+  // Dropping a file on the window would otherwise navigate away from the app
+  // (losing unsaved strokes). The app is a single page: block all navigation.
+  mainWindow.webContents.on('will-navigate', (e) => e.preventDefault())
+
+  // Give the renderer a chance to flush pending auto-saves before closing.
+  // Falls back to closing anyway if it doesn't answer (e.g. it crashed).
+  let closeConfirmed = false
+  let closeRequested = false
+  mainWindow.on('close', (e) => {
+    if (closeConfirmed) return
+    e.preventDefault()
+    if (closeRequested) return
+    closeRequested = true
+
+    const finish = () => {
+      clearTimeout(timer)
+      ipcMain.removeListener(IPC.APP_CLOSE_READY, onReady)
+      closeConfirmed = true
+      if (!mainWindow.isDestroyed()) mainWindow.close()
+    }
+    const onReady = (ev: Electron.IpcMainEvent) => {
+      if (ev.sender === mainWindow.webContents) finish()
+    }
+    const timer = setTimeout(finish, 4000)
+    ipcMain.on(IPC.APP_CLOSE_READY, onReady)
+    mainWindow.webContents.send(IPC.APP_BEFORE_CLOSE)
   })
 
   if (process.env['ELECTRON_RENDERER_URL']) {

@@ -15,7 +15,7 @@
  */
 
 import { app } from 'electron'
-import { join, extname } from 'path'
+import { join, extname, resolve, relative, isAbsolute } from 'path'
 import {
   mkdirSync,
   existsSync,
@@ -41,9 +41,30 @@ function baseDir(): string {
   return _baseDir
 }
 
+// ── Path safety ────────────────────────────────────────────────────────────────
+//
+// Notebook/page ids come from the renderer and are interpolated into paths, so
+// reject anything that isn't a plain id (no separators, no "..").
+
+const ID_RE = /^[A-Za-z0-9-]{1,64}$/
+
+function safeId(id: string): string {
+  if (typeof id !== 'string' || !ID_RE.test(id)) throw new Error(`Invalid id: ${String(id)}`)
+  return id
+}
+
+/** True if `filePath` resolves to a location inside the app's notebook data dir. */
+export function isInsideDataDir(filePath: string): boolean {
+  if (typeof filePath !== 'string' || !filePath) return false
+  const rel = relative(baseDir(), resolve(filePath))
+  return !!rel && !rel.startsWith('..') && !isAbsolute(rel)
+}
+
+const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'])
+
 // ── Directory helpers ──────────────────────────────────────────────────────────
 
-const nbDir         = (nbId: string) => join(baseDir(), nbId)
+const nbDir         = (nbId: string) => join(baseDir(), safeId(nbId))
 const pagesDir      = (nbId: string) => join(nbDir(nbId), 'pages')
 const thumbnailsDir = (nbId: string) => join(nbDir(nbId), 'thumbnails')
 const assetsDir     = (nbId: string) => join(nbDir(nbId), 'assets')
@@ -78,13 +99,14 @@ export function saveStrokeData(
   file: StrokeFile
 ): string {
   ensureNotebookDirs(notebookId)
-  const filePath = join(pagesDir(notebookId), `page-${pageId}.json.gz`)
+  const filePath = join(pagesDir(notebookId), `page-${safeId(pageId)}.json.gz`)
   const compressed = gzipSync(Buffer.from(JSON.stringify(file), 'utf8'))
   atomicWrite(filePath, compressed)
   return filePath
 }
 
 export function loadStrokeData(notebookId: string, pageId: string): StrokeFile | null {
+  safeId(pageId)
   // Try compressed format first
   const gzPath = join(pagesDir(notebookId), `page-${pageId}.json.gz`)
   if (existsSync(gzPath)) {
@@ -111,7 +133,7 @@ export function loadStrokeData(notebookId: string, pageId: string): StrokeFile |
 
 export function saveThumbnail(notebookId: string, pageId: string, base64: string): string {
   ensureNotebookDirs(notebookId)
-  const filePath = join(thumbnailsDir(notebookId), `thumb-${pageId}.jpg`)
+  const filePath = join(thumbnailsDir(notebookId), `thumb-${safeId(pageId)}.jpg`)
   const raw = base64.includes(',') ? base64.split(',')[1] : base64
   const buffer = Buffer.from(raw, 'base64')
   atomicWrite(filePath, buffer)
@@ -119,7 +141,7 @@ export function saveThumbnail(notebookId: string, pageId: string, base64: string
 }
 
 export function getThumbnailPath(notebookId: string, pageId: string): string {
-  return join(thumbnailsDir(notebookId), `thumb-${pageId}.jpg`)
+  return join(thumbnailsDir(notebookId), `thumb-${safeId(pageId)}.jpg`)
 }
 
 // ── PDF import ─────────────────────────────────────────────────────────────────
@@ -137,8 +159,9 @@ export function importPDF(notebookId: string, sourcePath: string): string {
 /** Copy an image file into a notebook's assets folder. Returns the absolute dest path. */
 export function importImage(notebookId: string, sourcePath: string): string {
   ensureNotebookDirs(notebookId)
-  const ext = extname(sourcePath).toLowerCase() || '.png'
-  const filename = `img-${randomUUID()}${ext}`
+  const rawExt = extname(sourcePath).slice(1).toLowerCase()
+  const ext = IMAGE_EXTS.has(rawExt) ? rawExt : 'png'
+  const filename = `img-${randomUUID()}.${ext}`
   const destPath = join(assetsDir(notebookId), filename)
   copyFileSync(sourcePath, destPath)
   return destPath
@@ -147,7 +170,8 @@ export function importImage(notebookId: string, sourcePath: string): string {
 /** Save a raw image buffer (from clipboard) into a notebook's assets folder. */
 export function saveImageFromBuffer(notebookId: string, buffer: Buffer, ext: string): string {
   ensureNotebookDirs(notebookId)
-  const filename = `img-${randomUUID()}.${ext}`
+  const safeExt = IMAGE_EXTS.has(String(ext).toLowerCase()) ? String(ext).toLowerCase() : 'png'
+  const filename = `img-${randomUUID()}.${safeExt}`
   const destPath = join(assetsDir(notebookId), filename)
   atomicWrite(destPath, buffer)
   return destPath
@@ -157,6 +181,7 @@ export function saveImageFromBuffer(notebookId: string, buffer: Buffer, ext: str
 
 /** Remove a page's stroke data and thumbnail from disk (assets are shared, kept). */
 export function deletePageFiles(notebookId: string, pageId: string): void {
+  safeId(pageId)
   const candidates = [
     join(pagesDir(notebookId), `page-${pageId}.json.gz`),
     join(pagesDir(notebookId), `page-${pageId}.json`),

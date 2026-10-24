@@ -13,6 +13,7 @@
 
 import { useState, useRef, useCallback, useEffect, RefObject } from 'react'
 import type { PageImage, Viewport } from '@shared/types'
+import type { ImageUpdateOptions } from '../../hooks/useUndoRedo'
 import { useNotebookStore } from '../../stores/notebookStore'
 import { useToolStore } from '../../stores/toolStore'
 
@@ -105,7 +106,7 @@ function ContextMenu({ x, y, image, onClose, onBringToFront, onSendToBack, onTog
 interface Props {
   viewportRef:        RefObject<Viewport>
   containerRef:       RefObject<HTMLElement>
-  onUpdateImage:      (id: string, updates: Partial<PageImage>) => void
+  onUpdateImage:      (id: string, updates: Partial<PageImage>, opts?: ImageUpdateOptions) => void
   onRemoveImage:      (id: string) => void
   onAddDuplicateImage?: (img: PageImage) => void
 }
@@ -131,6 +132,7 @@ export default function ImageSelectionOverlay({
     mode:    'move' | HandleType
     startSX: number; startSY: number          // screen coords at drag start
     origImg: PageImage                         // image state at drag start
+    last:    Partial<PageImage> | null         // latest live update (committed on release)
   } | null>(null)
 
   // Sync viewport from the applyTransform events in InkCanvas
@@ -155,6 +157,8 @@ export default function ImageSelectionOverlay({
     if (activeTool !== 'select') return
     const onKey = (e: KeyboardEvent) => {
       if (!selectedId) return
+      const t = e.target as HTMLElement
+      if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable) return
       if (e.key === 'Delete' || e.key === 'Backspace') {
         onRemoveImage(selectedId)
         setSelectedId(null)
@@ -209,7 +213,7 @@ export default function ImageSelectionOverlay({
       const hit = hitTestImages(sx, sy)
       if (hit && !hit.locked) {
         setSelectedId(hit.id)
-        dragRef.current = { mode: 'move', startSX: e.clientX, startSY: e.clientY, origImg: { ...hit } }
+        dragRef.current = { mode: 'move', startSX: e.clientX, startSY: e.clientY, origImg: { ...hit }, last: null }
         ;(e.target as HTMLElement).setPointerCapture(e.pointerId)
       } else {
         setSelectedId(null)
@@ -229,8 +233,15 @@ export default function ImageSelectionOverlay({
     const dcx = dsx / viewport.scale
     const dcy = dsy / viewport.scale
 
+    // Live preview without undo entries; the whole drag is recorded as a
+    // single step on release (see onBackdropUp)
+    const preview = (updates: Partial<PageImage>) => {
+      dr.last = updates
+      onUpdateImage(img.id, updates, { record: false })
+    }
+
     if (dr.mode === 'move') {
-      onUpdateImage(img.id, {
+      preview({
         x: dr.origImg.x + dcx,
         y: dr.origImg.y + dcy,
       })
@@ -240,7 +251,7 @@ export default function ImageSelectionOverlay({
       const { sx: cxS, sy: cyS } = toScreen(cx, cy)
       const angle = Math.atan2(e.clientY - cyS, e.clientX - cxS) * (180 / Math.PI) + 90
       const snapped = e.shiftKey ? Math.round(angle / 15) * 15 : angle
-      onUpdateImage(img.id, { rotation: snapped })
+      preview({ rotation: snapped })
     } else {
       // Resize handle
       const { origImg } = dr
@@ -260,18 +271,27 @@ export default function ImageSelectionOverlay({
           break
         }
         case 'e': width  = Math.max(20, origImg.width  + dcx); if (keepRatio) height = width / ratio;  break
-        case 'w': width  = Math.max(20, origImg.width  - dcx); x = origImg.x + origImg.width - width;  break
+        case 'w': width  = Math.max(20, origImg.width  - dcx); x = origImg.x + origImg.width - width; if (keepRatio) height = width / ratio; break
         case 's': height = Math.max(20, origImg.height + dcy); if (keepRatio) width  = height * ratio; break
         case 'n': height = Math.max(20, origImg.height - dcy); y = origImg.y + origImg.height - height; if (keepRatio) width = height * ratio; break
       }
-      onUpdateImage(img.id, { x, y, width, height })
+      preview({ x, y, width, height })
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [images, selectedId, viewport, onUpdateImage])
 
   const onBackdropUp = useCallback((_e: React.PointerEvent) => {
+    const dr = dragRef.current
     dragRef.current = null
-  }, [])
+    if (!dr?.last) return
+    // Commit the drag as one undo step, from the pre-drag state
+    const before: Partial<PageImage> = {}
+    for (const k of Object.keys(dr.last) as (keyof PageImage)[]) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(before as any)[k] = dr.origImg[k]
+    }
+    onUpdateImage(dr.origImg.id, dr.last, { before })
+  }, [onUpdateImage])
 
   // ── Handle pointer down (resize / rotate) ───────────────────────────────────
 
@@ -280,7 +300,7 @@ export default function ImageSelectionOverlay({
       e.stopPropagation()
       const img = images.find((i) => i.id === selectedId)
       if (!img) return
-      dragRef.current = { mode: handleId, startSX: e.clientX, startSY: e.clientY, origImg: { ...img } }
+      dragRef.current = { mode: handleId, startSX: e.clientX, startSY: e.clientY, origImg: { ...img }, last: null }
       ;(e.target as HTMLElement).setPointerCapture(e.pointerId)
     },
     [images, selectedId]
@@ -317,6 +337,7 @@ export default function ImageSelectionOverlay({
         onPointerDown={onBackdropDown}
         onPointerMove={onBackdropMove}
         onPointerUp={onBackdropUp}
+        onPointerCancel={onBackdropUp}
         onContextMenu={(e) => {
           const rect = containerRef.current?.getBoundingClientRect()
           const sx = e.clientX - (rect?.left ?? 0)
@@ -397,6 +418,9 @@ export default function ImageSelectionOverlay({
                       : 'bg-white border-2 border-blue-500 shadow-sm rounded-sm'
                   }
                   onPointerDown={(e) => onHandleDown(e, h.id)}
+                  onPointerMove={onBackdropMove}
+                  onPointerUp={onBackdropUp}
+                  onPointerCancel={onBackdropUp}
                 />
               )
             })}
@@ -420,7 +444,8 @@ export default function ImageSelectionOverlay({
           }}
           onToggleLock={() => onUpdateImage(selectedImg.id, { locked: !selectedImg.locked })}
           onDuplicate={() => {
-            if (onAddDuplicateImage) onAddDuplicateImage({ ...selectedImg, x: selectedImg.x + 20, y: selectedImg.y + 20 })
+            // The handler already offsets the copy
+            if (onAddDuplicateImage) onAddDuplicateImage(selectedImg)
           }}
           onDelete={() => { onRemoveImage(selectedImg.id); setSelectedId(null) }}
           onSetOpacity={(v) => onUpdateImage(selectedImg.id, { opacity: v })}

@@ -57,7 +57,6 @@ export default function InkCanvas({ toolSettingsRef }: InkCanvasProps) {
 
   const prevPageRef    = useRef<{ id: string; notebookId: string } | null>(null)
   const loadedPageIdRef = useRef<string | null>(null)
-  const nullDocRef     = useRef(null)
 
   useEffect(() => {
     function handleState(state: ReturnType<typeof useNotebookStore.getState>) {
@@ -75,7 +74,9 @@ export default function InkCanvas({ toolSettingsRef }: InkCanvasProps) {
         }
         prevPageRef.current = page ? { id: page.id, notebookId: page.notebookId } : null
         loadedPageIdRef.current = null
-        if (!page) loadPageData([], [], 'blank')
+        // Blank the canvas right away so the outgoing page's content can't be
+        // edited (or saved) as if it belonged to the incoming page
+        loadPageData([], [], page?.template ?? 'blank')
       }
 
       // Load page content once the async stroke fetch has finished.
@@ -152,9 +153,9 @@ export default function InkCanvas({ toolSettingsRef }: InkCanvasProps) {
                   : item.type === 'image/webp' ? 'webp'
                   : 'png'
 
-        const buffer = Array.from(new Uint8Array(await blob.arrayBuffer()))
+        const bytes = new Uint8Array(await blob.arrayBuffer())
         const result = await window.electronAPI.invoke<{ filePath: string }>(
-          IPC.IMAGE_PASTE, { notebookId: activeNotebook.id, bytes: buffer, ext }
+          IPC.IMAGE_PASTE, { notebookId: activeNotebook.id, bytes, ext }
         )
         if (result?.filePath) {
           // Center on the current viewport
@@ -235,6 +236,8 @@ export default function InkCanvas({ toolSettingsRef }: InkCanvasProps) {
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement
+      if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable) return
       if (e.code === 'Space' && !e.repeat) {
         isSpaceDownRef.current = true
         if (containerRef.current) containerRef.current.style.cursor = 'grab'
@@ -290,17 +293,19 @@ export default function InkCanvas({ toolSettingsRef }: InkCanvasProps) {
       if (!spacePanRef.current) return
       e.stopImmediatePropagation()
       spacePanRef.current = null
-      container.style.cursor = 'grab'
+      container.style.cursor = isSpaceDownRef.current ? 'grab' : 'none'
     }
 
-    container.addEventListener('pointerdown', onPointerDown, { capture: true })
-    container.addEventListener('pointermove', onPointerMove, { capture: true })
-    container.addEventListener('pointerup',   onPointerUp,   { capture: true })
+    container.addEventListener('pointerdown',   onPointerDown, { capture: true })
+    container.addEventListener('pointermove',   onPointerMove, { capture: true })
+    container.addEventListener('pointerup',     onPointerUp,   { capture: true })
+    container.addEventListener('pointercancel', onPointerUp,   { capture: true })
 
     return () => {
-      container.removeEventListener('pointerdown', onPointerDown, { capture: true })
-      container.removeEventListener('pointermove', onPointerMove, { capture: true })
-      container.removeEventListener('pointerup',   onPointerUp,   { capture: true })
+      container.removeEventListener('pointerdown',   onPointerDown, { capture: true })
+      container.removeEventListener('pointermove',   onPointerMove, { capture: true })
+      container.removeEventListener('pointerup',     onPointerUp,   { capture: true })
+      container.removeEventListener('pointercancel', onPointerUp,   { capture: true })
     }
   }, [applyTransform])
 
@@ -335,14 +340,14 @@ export default function InkCanvas({ toolSettingsRef }: InkCanvasProps) {
         }
         case 'export': {
           const { activeNotebook, pages } = useNotebookStore.getState()
-          if (activeNotebook) void exportAnnotatedPDF(activeNotebook.id, activeNotebook.name, pages, nullDocRef)
+          if (activeNotebook) void exportAnnotatedPDF(activeNotebook.id, activeNotebook.name, pages)
           break
         }
       }
     }
     window.addEventListener('ink:action', handler)
     return () => window.removeEventListener('ink:action', handler)
-  }, [undo, redo, clearCanvas, zoomAt, applyTransform, nullDocRef])
+  }, [undo, redo, clearCanvas, zoomAt, applyTransform])
 
   // ── Duplicate image helper (passed to overlay context menu) ──────────────────
 

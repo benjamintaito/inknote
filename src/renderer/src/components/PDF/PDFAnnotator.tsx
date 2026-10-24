@@ -69,7 +69,7 @@ export default function PDFAnnotator({ toolSettingsRef }: PDFAnnotatorProps) {
     activeToolRef
   )
 
-  const { loadPDF, renderPageToCanvas, isLoading, cleanup, docRef } = usePDFDocument()
+  const { loadPDF, renderPageToCanvas, isLoading, cleanup } = usePDFDocument()
 
   // Track the currently loaded PDF path to avoid reloading the same PDF
   const currentPdfPathRef = useRef<string | null>(null)
@@ -157,6 +157,8 @@ export default function PDFAnnotator({ toolSettingsRef }: PDFAnnotatorProps) {
         prevPageRef.current = page ? { id: page.id, notebookId: page.notebookId } : null
         pdfReadyPageIdRef.current = null
         loadedPageIdRef.current = null
+        // Clear the outgoing page's ink so it can't be edited as the new page's
+        loadPageData([], [], 'pdf')
       }
 
       if (!page || page.template !== 'pdf' || !page.pdfPath) return
@@ -181,10 +183,12 @@ export default function PDFAnnotator({ toolSettingsRef }: PDFAnnotatorProps) {
             }
           }
 
-          // Render the PDF page (pageOrder is 0-based, pdfjs is 1-based)
+          // Render the PDF page (pdfPageIndex is 0-based, pdfjs is 1-based).
+          // pageOrder is only a fallback: it changes when pages are reordered.
           const pdfCanvas = pdfCanvasRef.current
           if (!pdfCanvas) return
-          const result = await renderPageToCanvas(page.pageOrder + 1, pdfCanvas)
+          const pdfPageNum = (page.pdfPageIndex ?? page.pageOrder) + 1
+          const result = await renderPageToCanvas(pdfPageNum, pdfCanvas)
           if (!result) return
 
           // Abort if the user already navigated elsewhere during the async render
@@ -205,7 +209,8 @@ export default function PDFAnnotator({ toolSettingsRef }: PDFAnnotatorProps) {
           recenterViewport(canvasW, canvasH)
           pdfReadyPageIdRef.current = page.id
         } finally {
-          renderingPageIdRef.current = null
+          // A newer page may have started rendering meanwhile; keep its marker
+          if (renderingPageIdRef.current === page.id) renderingPageIdRef.current = null
         }
 
         // The stroke fetch may have finished while the PDF was rendering
@@ -281,9 +286,9 @@ export default function PDFAnnotator({ toolSettingsRef }: PDFAnnotatorProps) {
                   : item.type === 'image/webp' ? 'webp'
                   : 'png'
 
-        const buffer = Array.from(new Uint8Array(await blob.arrayBuffer()))
+        const bytes = new Uint8Array(await blob.arrayBuffer())
         const result = await window.electronAPI.invoke<{ filePath: string }>(
-          IPC.IMAGE_PASTE, { notebookId: activeNotebook.id, bytes: buffer, ext }
+          IPC.IMAGE_PASTE, { notebookId: activeNotebook.id, bytes, ext }
         )
         if (result?.filePath) {
           const container = containerRef.current
@@ -368,7 +373,7 @@ export default function PDFAnnotator({ toolSettingsRef }: PDFAnnotatorProps) {
         }
         case 'export': {
           const { activeNotebook: nb, pages: ps } = useNotebookStore.getState()
-          if (nb) void exportAnnotatedPDF(nb.id, nb.name, ps, docRef)
+          if (nb) void exportAnnotatedPDF(nb.id, nb.name, ps)
           break
         }
       }
@@ -376,7 +381,7 @@ export default function PDFAnnotator({ toolSettingsRef }: PDFAnnotatorProps) {
 
     window.addEventListener('ink:action', handler)
     return () => window.removeEventListener('ink:action', handler)
-  }, [undo, redo, clearCanvas, zoomAt, applyTransform, recenterViewport, docRef])
+  }, [undo, redo, clearCanvas, zoomAt, applyTransform, recenterViewport])
 
   // ── Page navigation ───────────────────────────────────────────────────────
 
@@ -397,8 +402,8 @@ export default function PDFAnnotator({ toolSettingsRef }: PDFAnnotatorProps) {
 
   const handleExport = useCallback(() => {
     if (!activeNotebook) return
-    void exportAnnotatedPDF(activeNotebook.id, activeNotebook.name, pages, docRef)
-  }, [activeNotebook, pages, docRef])
+    void exportAnnotatedPDF(activeNotebook.id, activeNotebook.name, pages)
+  }, [activeNotebook, pages])
 
   const onAddDuplicateImage = useCallback(async (src: PageImage) => {
     await addImageToPage(src.src, src.x + src.width / 2 + 20, src.y + src.height / 2 + 20)

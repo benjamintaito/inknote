@@ -19,6 +19,8 @@ let _progressCb: ((p: OCRProgress) => void) | null = null
 
 function getWorker(): Promise<Worker> {
   if (!_workerPromise) {
+    // Registered here (not in main.tsx) so this module stays lazily loaded
+    window.addEventListener('beforeunload', () => { void terminateOCRWorker() }, { once: true })
     _workerPromise = createWorker(['spa', 'eng'], 1, {
       logger: (m: { status: string; progress: number }) => {
         if (m.status === 'recognizing text') {
@@ -44,7 +46,16 @@ function renderStrokesToCanvas(
   width: number,
   height: number
 ): HTMLCanvasElement {
-  // Render at full page resolution using the existing StrokeRenderer
+  // Render at full page resolution using the existing StrokeRenderer.
+  // The page size can be smaller than the canvas the strokes were drawn on
+  // (PDF pages store points but are annotated at PDF_RENDER_SCALE), so grow
+  // the canvas to fit every stroke.
+  for (const s of strokes) {
+    for (const p of s.points) {
+      if (p.x + s.baseWidth > width)  width  = Math.ceil(p.x + s.baseWidth)
+      if (p.y + s.baseWidth > height) height = Math.ceil(p.y + s.baseWidth)
+    }
+  }
   const full = document.createElement('canvas')
   full.width  = width
   full.height = height
@@ -72,7 +83,9 @@ function binarize(canvas: HTMLCanvasElement): void {
   const img  = ctx.getImageData(0, 0, canvas.width, canvas.height)
   const data = img.data
   for (let i = 0; i < data.length; i += 4) {
-    const isWhite = data[i] > 240 && data[i + 1] > 240 && data[i + 2] > 240
+    // Transparent pixels (e.g. cut out by legacy eraser strokes) count as paper
+    const isWhite = data[i + 3] < 128 ||
+      (data[i] > 240 && data[i + 1] > 240 && data[i + 2] > 240)
     const val = isWhite ? 255 : 0
     data[i]     = val
     data[i + 1] = val
@@ -104,11 +117,15 @@ export async function recognizeText(
   height: number,
   onProgress?: (p: OCRProgress) => void
 ): Promise<string> {
-  const inkStrokes = strokes.filter((s) => s.tool !== 'eraser')
+  // Highlighter marks cover text rather than form it; binarized they become
+  // solid black blobs that wreck recognition
+  const inkStrokes = strokes.filter((s) => s.tool !== 'eraser' && s.tool !== 'highlighter')
   if (inkStrokes.length === 0) return ''
 
   onProgress?.({ status: 'Preparando imagen…', progress: 0 })
-  const canvas = renderStrokesToCanvas(strokes, width, height)
+  const canvas = renderStrokesToCanvas(
+    strokes.filter((s) => s.tool !== 'highlighter'), width, height
+  )
   binarize(canvas)
 
   onProgress?.({ status: 'Cargando motor OCR…', progress: 0.1 })

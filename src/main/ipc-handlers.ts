@@ -13,13 +13,13 @@ import {
   createFolder, getFolders, updateFolder, deleteFolder,
   createNotebook, getNotebooks, getNotebookById,
   updateNotebook, deleteNotebook, moveNotebookToFolder, getNotebookCategories,
-  createPage, getPages, deletePage, reorderPages, updatePagePaths,
-  saveOCRText, searchPages,
+  createPage, getPages, deletePage, reorderPages, updatePagePaths, pageExists,
+  saveOCRText, searchPages, batch,
 } from './db.js'
 import {
   saveStrokeData, loadStrokeData,
   saveThumbnail, importPDF, importImage, saveImageFromBuffer,
-  deleteNotebookFiles, deletePageFiles, ensureNotebookDirs,
+  deleteNotebookFiles, deletePageFiles, ensureNotebookDirs, isInsideDataDir,
 } from './file-manager.js'
 import {
   showOpenPDFDialog, showSavePDFDialog, readFileBytes, writePDFBytes,
@@ -136,18 +136,25 @@ export function registerIpcHandlers(): void {
   }, void>(
     IPC.PAGE_SAVE_STROKES,
     ({ notebookId, pageId, strokes, images, metadata }) => {
+      // A save can still be in flight when its page/notebook gets deleted —
+      // don't resurrect the files (or the notebook directory) in that case.
+      if (!pageExists(pageId)) return
       const file: StrokeFile = { version: 2, pageId, strokes, images: images ?? [], metadata }
       const path = saveStrokeData(notebookId, pageId, file)
       updatePagePaths(pageId, { strokeDataPath: path })
     }
   )
 
-  handle<{ notebookId: string; pageId: string; base64: string }, { thumbnailPath: string }>(
+  handle<
+    { notebookId: string; pageId: string; base64: string },
+    { thumbnailPath: string; updatedAt: string } | null
+  >(
     IPC.PAGE_SAVE_THUMBNAIL,
     ({ notebookId, pageId, base64 }) => {
+      if (!pageExists(pageId)) return null
       const path = saveThumbnail(notebookId, pageId, base64)
-      updatePagePaths(pageId, { thumbnailPath: path })
-      return { thumbnailPath: path }
+      const updatedAt = updatePagePaths(pageId, { thumbnailPath: path }) ?? new Date().toISOString()
+      return { thumbnailPath: path, updatedAt }
     }
   )
 
@@ -179,7 +186,7 @@ export function registerIpcHandlers(): void {
     }
   )
 
-  handle<{ notebookId: string; bytes: number[]; ext: string }, { filePath: string }>(
+  handle<{ notebookId: string; bytes: Uint8Array; ext: string }, { filePath: string }>(
     IPC.IMAGE_PASTE,
     ({ notebookId, bytes, ext }) => ({
       filePath: saveImageFromBuffer(notebookId, Buffer.from(bytes), ext),
@@ -189,7 +196,8 @@ export function registerIpcHandlers(): void {
   handle<{ filePath: string }, string | null>(
     IPC.IMAGE_READ,
     ({ filePath }) => {
-      if (!existsSync(filePath)) return null
+      // Only serve files from the app's own data directory
+      if (!isInsideDataDir(filePath) || !existsSync(filePath)) return null
       try {
         const buf = readFileSync(filePath)
         const ext = extname(filePath).slice(1).toLowerCase()
@@ -224,46 +232,55 @@ export function registerIpcHandlers(): void {
     async ({ sourcePath, name }) => {
       const { PDFDocument } = await import('pdf-lib')
 
-      // Read source PDF bytes and open with pdf-lib to get page sizes
+      // Read source PDF bytes and open with pdf-lib to get page sizes.
+      // ignoreEncryption: owner-password-protected PDFs are common and still
+      // readable — we only need their page geometry here.
       const srcBytes = readFileBytes(sourcePath)
-      const srcDoc = await PDFDocument.load(srcBytes)
-      const pdfPageCount = srcDoc.getPageCount()
+      const srcDoc = await PDFDocument.load(srcBytes, { ignoreEncryption: true })
+      const srcPages = srcDoc.getPages()
+      if (srcPages.length === 0) throw new Error('El PDF no tiene páginas.')
 
-      // Create notebook
-      const nb = createNotebook({
-        id:      uuidv4(),
-        name,
-        subject: null,
-        color:   '#3b82f6',
-      })
-      ensureNotebookDirs(nb.id)
+      const notebookId = uuidv4()
+      try {
+        // Copy PDF into notebook assets
+        ensureNotebookDirs(notebookId)
+        const pdfPath = importPDF(notebookId, sourcePath)
 
-      // Copy PDF into notebook assets
-      const pdfPath = importPDF(nb.id, sourcePath)
-
-      // Create one page per PDF page
-      const pages: PageMeta[] = []
-      for (let i = 0; i < pdfPageCount; i++) {
-        const pdfPage = srcDoc.getPages()[i]
-        const { width, height } = pdfPage.getSize()
-        const page = createPage({
-          id:         uuidv4(),
-          notebookId: nb.id,
-          template:   'pdf',
-          width:      Math.round(width),
-          height:     Math.round(height),
+        // Notebook + one page per PDF page, persisted once
+        return batch(() => {
+          const nb = createNotebook({
+            id:      notebookId,
+            name,
+            subject: null,
+            color:   '#3b82f6',
+          })
+          const pages: PageMeta[] = srcPages.map((pdfPage, i) => {
+            const { width, height } = pdfPage.getSize()
+            return createPage({
+              id:           uuidv4(),
+              notebookId,
+              template:     'pdf',
+              width:        Math.round(width),
+              height:       Math.round(height),
+              pdfPath,
+              pdfPageIndex: i,
+            })
+          })
+          return { notebook: nb, pages, pdfPath }
         })
-        updatePagePaths(page.id, { pdfPath })
-        pages.push({ ...page, pdfPath })
+      } catch (e) {
+        deleteNotebookFiles(notebookId)
+        throw e
       }
-
-      return { notebook: nb, pages, pdfPath }
     }
   )
 
   handle<{ filePath: string }, Buffer>(
     IPC.PDF_READ_BYTES,
-    ({ filePath }) => readFileBytes(filePath)
+    ({ filePath }) => {
+      if (!isInsideDataDir(filePath)) throw new Error('Ruta de PDF no permitida')
+      return readFileBytes(filePath)
+    }
   )
 
   handle<{ defaultName: string }, string | null>(
@@ -271,7 +288,7 @@ export function registerIpcHandlers(): void {
     ({ defaultName }) => showSavePDFDialog(defaultName)
   )
 
-  handle<{ filePath: string; bytes: number[] }, void>(
+  handle<{ filePath: string; bytes: Uint8Array }, void>(
     IPC.PDF_EXPORT_SAVE,
     ({ filePath, bytes }) => writePDFBytes(filePath, new Uint8Array(bytes))
   )

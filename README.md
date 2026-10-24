@@ -143,11 +143,11 @@ of the OCR language data (Spanish + English, ~15 MB) the first time you run OCR.
 folders     (id, name, color, sort_order, created_at)
 notebooks   (id, name, subject, color, folder_id, created_at, updated_at)
 pages       (id, notebook_id, page_order, width, height, template,
-             pdf_path, stroke_data_path, thumbnail_path, ocr_text,
-             created_at, updated_at)
+             pdf_path, pdf_page_index, stroke_data_path, thumbnail_path,
+             ocr_text, created_at, updated_at)
 ```
 
-Foreign keys enabled. Atomic writes via temp→rename. `ocr_text` added via migration if missing.
+Foreign keys enabled. Atomic writes via temp→rename. `ocr_text` and `pdf_page_index` (which page of the source PDF a page shows, independent of `page_order`) are added via migration if missing.
 
 ---
 

@@ -8,6 +8,7 @@ import { smoothPoints } from '../components/Canvas/StrokeSmoothing'
 import { renderStroke } from '../components/Canvas/StrokeRenderer'
 import { renderTemplate } from '../components/Notebook/PageTemplates'
 import { useUndoRedo } from './useUndoRedo'
+import type { ImageUpdateOptions } from './useUndoRedo'
 import { useNotebookStore } from '../stores/notebookStore'
 import { useToolStore } from '../stores/toolStore'
 import { predictNextPoints } from '../components/Canvas/PredictiveInk'
@@ -142,20 +143,15 @@ function drawCursorIndicator(
   ctx.beginPath()
   ctx.arc(x, y, radius, 0, Math.PI * 2)
 
-  if (tool.tool === 'pen') {
-    ctx.globalAlpha = 0.65
-    ctx.fillStyle = tool.color
-    ctx.fill()
-  } else if (tool.tool === 'highlighter') {
-    ctx.globalAlpha = 0.35
-    ctx.fillStyle = tool.color
-    ctx.fill()
-  } else {
-    // eraser
+  if (tool.tool === 'eraser') {
     ctx.globalAlpha = 1
     ctx.strokeStyle = '#9ca3af'
     ctx.lineWidth = 1.5
     ctx.stroke()
+  } else {
+    ctx.globalAlpha = tool.tool === 'highlighter' ? 0.35 : 0.65
+    ctx.fillStyle = tool.color
+    ctx.fill()
   }
   ctx.restore()
 }
@@ -175,9 +171,11 @@ export function useInkCanvas(
   const palmRef = useRef(new PalmRejection({ penCooldownMs: 500, maxTouchSize: 20 }))
   const currentTemplateRef = useRef<PageTemplate>('blank')
 
-  // Bitmap cache
+  // Bitmap cache: frozenCanvasRef holds template + images + the first
+  // frozenCountRef strokes (exactly the ones in frozenStrokesRef)
   const frozenCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const frozenCountRef = useRef<number>(0)
+  const frozenStrokesRef = useRef<Stroke[]>([])
 
   // Predictive ink
   const predictedPointsRef = useRef<Point[]>([])
@@ -222,8 +220,29 @@ export function useInkCanvas(
 
   // ── Bitmap freeze ─────────────────────────────────────────────────────────────
 
+  const invalidateFrozen = () => {
+    frozenCanvasRef.current = null
+    frozenCountRef.current  = 0
+    frozenStrokesRef.current = []
+  }
+
+  /** The cache is only usable if `strokes` still starts with the frozen strokes
+   *  (erasing or undoing inside the frozen range changes that prefix). */
+  const isFrozenValid = (strokes: Stroke[]): boolean => {
+    if (!frozenCanvasRef.current) return false
+    const frozen = frozenStrokesRef.current
+    if (strokes.length < frozen.length) return false
+    for (let i = 0; i < frozen.length; i++) {
+      if (strokes[i] !== frozen[i]) return false
+    }
+    return true
+  }
+
   const tryFreezeBitmap = useCallback((strokes: Stroke[]) => {
     if (strokes.length <= BITMAP_FREEZE_TAIL) return
+    // Only rebuild once enough unfrozen strokes have accumulated; rebuilding
+    // on every stroke would cost more than not caching at all.
+    if (isFrozenValid(strokes) && strokes.length - frozenCountRef.current < BITMAP_FREEZE_TAIL * 2) return
     const freezeUpTo = strokes.length - BITMAP_FREEZE_TAIL
     const bg = backgroundRef.current
     if (!bg) return
@@ -237,9 +256,12 @@ export function useInkCanvas(
     renderTemplate(frozenCtx, template, bg.width, bg.height)
     drawImagesOnCtx(frozenCtx, imagesBridgeRef.current, imageCacheRef.current, template)
     const pdfMode = template === 'pdf'
-    for (const s of strokes.slice(0, freezeUpTo)) renderStroke(frozenCtx, s, 0, pdfMode)
+    const frozen = strokes.slice(0, freezeUpTo)
+    for (const s of frozen) renderStroke(frozenCtx, s, 0, pdfMode)
     frozenCanvasRef.current = frozenCanvas
     frozenCountRef.current = freezeUpTo
+    frozenStrokesRef.current = frozen
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [backgroundRef])
 
   // ── Background redraw (triggered by undo/redo, with cache support) ────────────
@@ -258,11 +280,8 @@ export function useInkCanvas(
     const template = currentTemplateRef.current
     const pdfMode  = template === 'pdf'
 
-    // Invalidate cache if undo went below frozen count
-    if (frozenCanvasRef.current && strokes.length < frozenCountRef.current) {
-      frozenCanvasRef.current = null
-      frozenCountRef.current = 0
-    }
+    // Invalidate cache if a frozen stroke was erased / undone / reordered
+    if (frozenCanvasRef.current && !isFrozenValid(strokes)) invalidateFrozen()
 
     if (frozenCanvasRef.current) {
       ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height)
@@ -282,9 +301,8 @@ export function useInkCanvas(
     imagesBridgeRef.current = imgs
     useNotebookStore.getState().setImages(imgs)
     // Invalidate frozen bitmap (images are now different)
-    frozenCanvasRef.current = null
-    frozenCountRef.current  = 0
-    redrawBackground(strokesBridgeRef.current)
+    invalidateFrozen()
+    redrawBackground(strokesBridgeRef.current, false)
   }, [redrawBackground])
 
   const {
@@ -297,8 +315,7 @@ export function useInkCanvas(
 
   const loadPageData = useCallback(
     (strokes: Stroke[], images: PageImage[], template: PageTemplate) => {
-      frozenCanvasRef.current = null
-      frozenCountRef.current  = 0
+      invalidateFrozen()
       currentTemplateRef.current = template
 
       resetStrokes(strokes)
@@ -333,7 +350,11 @@ export function useInkCanvas(
       if (!dataUrl) return
       const el = new Image()
       el.onload = () => {
+        // Page switched while loading — this image belongs to another page
+        if (!imagesBridgeRef.current.some((i) => i.id === img.id)) return
         imageCacheRef.current.set(img.id, el)
+        // The frozen bitmap was drawn without this image
+        invalidateFrozen()
         // Pure re-render: the page data didn't change, don't mark it dirty
         redrawBackground(strokesBridgeRef.current, false)
       }
@@ -398,11 +419,11 @@ export function useInkCanvas(
 
   /** Update image properties (position, size, rotation, etc.) with undo support. */
   const updateImageInPage = useCallback(
-    (id: string, after: Partial<PageImage>) => {
+    (id: string, after: Partial<PageImage>, opts?: ImageUpdateOptions) => {
       imagesBridgeRef.current = imagesBridgeRef.current.map((i) =>
         i.id === id ? { ...i, ...after } : i
       )
-      updateImage(id, after)   // updates imagesRef + pushes undo + calls onImagesChanged
+      updateImage(id, after, opts)   // updates imagesRef + pushes undo + calls onImagesChanged
     },
     [updateImage]
   )
@@ -439,9 +460,10 @@ export function useInkCanvas(
         ctx.restore()
       }
     } else {
-      // Draw cursor indicator when not actively drawing
+      // Draw cursor indicator when not actively drawing (not in select/pan mode)
       const cursorPos = cursorPosRef.current
-      if (cursorPos) {
+      const activeTool = useToolStore.getState().activeTool
+      if (cursorPos && activeTool !== 'select' && activeTool !== 'pan') {
         const tool = toolRef.current ?? DEFAULT_TOOL
         drawCursorIndicator(ctx, cursorPos.x, cursorPos.y, tool)
       }
@@ -465,7 +487,7 @@ export function useInkCanvas(
         if (hits.length > 0) {
           const hitIds = new Set(hits.map((s) => s.id))
           strokesRef.current = strokesRef.current.filter((s) => !hitIds.has(s.id))
-          redrawBackground(strokesRef.current)
+          redrawBackground(strokesRef.current, false)
         }
       } else {
         // Pixel eraser: split strokes at the erased circle
@@ -481,7 +503,7 @@ export function useInkCanvas(
         }
         if (changed) {
           strokesRef.current = next
-          redrawBackground(strokesRef.current)
+          redrawBackground(strokesRef.current, false)
         }
       }
     },
@@ -623,11 +645,8 @@ export function useInkCanvas(
         lineStartRef.current = null
         if (finalPts.length >= 2) {
           const finalStroke: Stroke = { ...currentStroke.current, points: finalPts }
-          const bgCtx = getBackgroundCtx()
-          if (bgCtx) renderStroke(bgCtx, finalStroke)
-          addStroke(finalStroke)
+          addStroke(finalStroke)   // redraws the background + syncs the store
           const allStrokes = strokesRef.current
-          useNotebookStore.getState().setStrokes(allStrokes)
           if (allStrokes.length > BITMAP_FREEZE_THRESHOLD) tryFreezeBitmap(allStrokes)
         }
         currentStroke.current = null
@@ -643,11 +662,8 @@ export function useInkCanvas(
 
       if (stroke.points.length >= 1) {
         const finalStroke: Stroke = { ...stroke, points: smoothPoints(stroke.points) }
-        const ctx = getBackgroundCtx()
-        if (ctx) renderStroke(ctx, finalStroke)
-        addStroke(finalStroke)
+        addStroke(finalStroke)   // redraws the background + syncs the store
         const allStrokes = strokesRef.current
-        useNotebookStore.getState().setStrokes(allStrokes)
 
         if (allStrokes.length > BITMAP_FREEZE_THRESHOLD) {
           tryFreezeBitmap(allStrokes)
@@ -739,17 +755,10 @@ export function useInkCanvas(
     undo,
     redo,
     clearCanvas: () => {
-      clearAll()
-      frozenCanvasRef.current = null
-      frozenCountRef.current  = 0
+      invalidateFrozen()
       clearOverlay()
-      // Redraw template + images (only strokes are cleared)
-      const ctx = getBackgroundCtx()
-      if (ctx) {
-        const template = currentTemplateRef.current
-        renderTemplate(ctx, template, ctx.canvas.width, ctx.canvas.height)
-        drawImagesOnCtx(ctx, imagesBridgeRef.current, imageCacheRef.current, template)
-      }
+      // Redraws template + images (only strokes are cleared) and syncs the store
+      clearAll()
     },
   }
 }
